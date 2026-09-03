@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Webカメラ表示</title>
+<style>
+  body {
+    font-family: sans-serif;
+    background: #1e1e1e;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem;
+  }
+  h1 {
+    font-size: 1.2rem;
+    font-weight: 500;
+  }
+  video {
+    width: 100%;
+    max-width: 640px;
+    border-radius: 8px;
+    background: #000;
+  }
+  #status {
+    margin-top: 1rem;
+    color: #aaa;
+    font-size: 0.9rem;
+  }
+  button {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid #555;
+    background: #2a2a2a;
+    color: #eee;
+    cursor: pointer;
+  }
+  button:hover {
+    background: #333;
+  }
+</style>
+</head>
+<body>
+  <h1>Webカメラ映像</h1>
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas" style="display:none;"></canvas>
+  <!-- <canvas id="canvas2" style="display:none;"></canvas> -->
+  <div>
+    <button id="startBtn">カメラを開始</button>
+    <button id="captureBtn" disabled>PNGとして保存</button>
+    <button id="test" disabled>test</button>
+  </div>
+  <p id="status">カメラは停止中です</p>
+  <img id="preview" style="max-width:640px; width:100%; display:none; border-radius:8px; margin-top:1rem;">
+  <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>この画像をダウンロード</a>
+
+<script>
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  //const canvas2 = document.getElementById('canvas2');
+  const status = document.getElementById('status');
+  const startBtn = document.getElementById('startBtn');
+  const captureBtn = document.getElementById('captureBtn');
+  const preview = document.getElementById('preview');
+  const downloadLink = document.getElementById('downloadLink');
+  const test = document.getElementByID('test');
+
+  // const BASE_URL = 'https://yce-api-01.makeupar.com/s2s/v2.0/task/aging';
+  // const START_METHOD = 'POST';
+  // const HEADERS = {
+  //   "Content-Type": "application/json",
+  //   "Authorization": "Bearer sk-Iui7UQeJWRSml-T46BzQnoAOp2gcP0YRdhFIH5e5794MdO-sy530yJ4018Qj9284"
+  // };
+  // const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // async function startTask(image) {
+  //   const init = {
+  //     method: START_METHOD,
+  //     headers: HEADERS,
+  //     body: JSON.stringify({
+  //       "request_id": 0,
+  //       "src_file_url": image
+  // }),
+  //   };
+
+  //   const res = await fetch(BASE_URL, init);
+  //   if (!res.ok) {
+  //     throw new Error(`Start request failed: ${res.status} ${res.statusText}`);
+  //   }
+
+  //   const payload = await res.json().catch(() => ({}));
+  //   const taskId = payload?.data?.task_id;
+  //   if (!taskId) {
+  //     throw new Error('task_id not found in response: ' + JSON.stringify(payload));
+  //   }
+
+  //   console.log('[startTask] Task started, id =', taskId);
+  //   return taskId;
+  // }
+
+  // async function pollTask(taskId, { intervalMs = 2000, maxAttempts = 300 } = {}) {
+  //   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  //     const pollUrl = BASE_URL + '/' + taskId;
+  //     const res = await fetch(pollUrl, { method: 'GET', headers: HEADERS });
+
+  //     if (!res.ok) {
+  //       throw new Error(`Polling failed: ${res.status} ${res.statusText}`);
+  //     }
+
+  //     const payload = await res.json().catch(() => ({}));
+  //     const status = payload?.data?.task_status;
+  //     console.log('[pollTask] Attempt', attempt, 'status =', status);
+
+  //     if (status === 'success') {
+  //       const results = payload?.data?.results;
+  //       console.log('[pollTask] Success results:', results);
+  //       return payload;
+  //     }
+  //     if (status === 'error') {
+  //       throw new Error('Task failed: ' + JSON.stringify(payload));
+  //     }
+
+  //     await sleep(intervalMs);
+  //   }
+  //   throw new Error('Max attempts exceeded while polling');
+  // }
+
+  /*
+
+  */
+  let stream = null;
+  // 直近にキャプチャしたPNG画像のURL（Blob URL）を保持する変数
+  let capturedImageUrl = null;
+
+  // test.addEventListener('click', async () => {
+  //   try {
+  //     const taskId = await startTask(capturedImageUrl);
+  //     const final = await pollTask(taskId);
+  //     console.log('[main] Final response:', final);
+  //     const ctx = canvas2.getContext('2d');
+  //     ctx.drawImage(final.output[0].url, 0, 0, canvas.width, canvas.height);
+  //   } catch (e) {
+  //     console.error('[main] Flow error:', e);
+  //     alert("Sorry, something went wrong:\n",e);
+  //   }
+  // });
+  startBtn.addEventListener('click', async () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      video.srcObject = null;
+      status.textContent = 'カメラは停止中です';
+      startBtn.textContent = 'カメラを開始';
+      captureBtn.disabled = true;
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      status.textContent = 'カメラ映像を表示中';
+      startBtn.textContent = 'カメラを停止';
+      captureBtn.disabled = false;
+    } catch (err) {
+      status.textContent = 'カメラへのアクセスに失敗しました: ' + err.message;
+    }
+  });
+
+  captureBtn.addEventListener('click', () => {
+    if (!stream) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob((blob) => {
+      // 古いURLが残っていれば解放してからメモリリークを防ぐ
+      if (capturedImageUrl) {
+        URL.revokeObjectURL(capturedImageUrl);
+      }
+
+      // PNG画像のURLを変数に保存し、imgタグに描画する
+      capturedImageUrl = URL.createObjectURL(blob);
+      preview.src = capturedImageUrl;
+      preview.style.display = 'block';
+
+      downloadLink.href = capturedImageUrl;
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadLink.download = `capture-${ts}.png`;
+      downloadLink.style.display = 'inline-block';
+
+      status.textContent = 'PNG画像をimgタグに描画しました';
+    }, 'image/png');
+    test.disabled=false;
+  });
+</script>
+</body>
+</html>
