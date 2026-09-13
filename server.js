@@ -16,7 +16,7 @@
 
 const express = require('express');
 const multer = require('multer');
-const cors = require('cors');
+// const cors = require('cors');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -25,9 +25,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // CORS設定: localhost:3000（ページを配信するオリジン）からのアクセスを許可
-app.use(cors({
-  origin: 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-3000.app.github.dev/'
-}));
+// app.use(cors({
+//   origin: 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-3000.app.github.dev/'
+// }));
 
 // アップロード先ディレクトリ（存在しなければ作成）
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -70,27 +70,34 @@ const upload = multer({
  * multipart/form-dataでフィールド名 "file" として画像を送信する
  * レスポンス例: { "file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
  */
+app.get('/',(req,res) => {
+  console.log("test");
+  res.send({msg:'Test!'});
+})
 app.post('/files', (req, res) => {
   console.log("posted.");
-  upload.single('file')(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    if (!req.file) {
-      return res.status(400).json({ error: 'ファイルが送信されていません' });
-    }
+  res.send({msg:"posted."});
+  // upload.single('file')(req, res, (err) => {
+  //   console.log("upload");
+  //   if (err) {
+  //     res.send({msg:"somethinig went wrong!\nerror:"+err.message});
+  //     return res.status(400).json({ error: err.message });
+  //   }
+  //   if (!req.file) {
+  //     return res.status(400).json({ error: 'ファイルが送信されていません' });
+  //   }
 
-    const fileId = req.generatedFileId;
+  //   const fileId = req.generatedFileId;
 
-    fileStore.set(fileId, {
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      uploadedAt: new Date().toISOString()
-    });
+  //   fileStore.set(fileId, {
+  //     filePath: req.file.path,
+  //     originalName: req.file.originalname,
+  //     mimeType: req.file.mimetype,
+  //     size: req.file.size,
+  //     uploadedAt: new Date().toISOString()
+  //   });
 
-    res.status(201).json({ file_id: fileId });
+  //   res.status(201).json({ file_id: fileId });
   });
 });
 
