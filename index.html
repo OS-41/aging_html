@@ -50,7 +50,9 @@
   <div>
     <button id="startBtn">カメラを開始</button>
     <button id="captureBtn" disabled>PNGとして保存</button>
-    <button id="test" disabled>test</button>
+    <form>
+      <button id="test" disabled>test</button>
+    </form>
   </div>
   <p id="status">カメラは停止中です</p>
   <img id="preview" style="max-width:640px; width:100%; display:none; border-radius:8px; margin-top:1rem;">
@@ -214,8 +216,8 @@
   test.addEventListener('click', async () => {
     try {
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      alert("resized");
-      const fileId = await uploadAndGetFileId(resizedBlob, 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-5000.app.github.dev/');
+      alert("resized: "+ await resizedBlob.text());
+      const fileId = await uploadAndGetFileId(resizedBlob, 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-5000.app.github.dev/files');
       console.log(fileId);
       // const taskId = await startTask(await getSendableImageUrl());
       // const final = await pollTask(taskId);

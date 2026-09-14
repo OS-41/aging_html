@@ -16,7 +16,7 @@
 
 const express = require('express');
 const multer = require('multer');
-// const cors = require('cors');
+const cors = require('cors');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -26,8 +26,17 @@ const PORT = process.env.PORT || 5000;
 
 // CORS設定: localhost:3000（ページを配信するオリジン）からのアクセスを許可
 // app.use(cors({
-//   origin: 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-3000.app.github.dev/'
+//   origin: 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-3000.app.github.dev'
 // }));
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "POST, OPTIONS","GET","DELETE");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200); // iOS対応：OPTIONSにはすぐ200を返す
+  }
+  next();
+});
 
 // アップロード先ディレクトリ（存在しなければ作成）
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -76,28 +85,29 @@ app.get('/',(req,res) => {
 })
 app.post('/files', (req, res) => {
   console.log("posted.");
-  res.send({msg:"posted."});
-  // upload.single('file')(req, res, (err) => {
-  //   console.log("upload");
-  //   if (err) {
-  //     res.send({msg:"somethinig went wrong!\nerror:"+err.message});
-  //     return res.status(400).json({ error: err.message });
-  //   }
-  //   if (!req.file) {
-  //     return res.status(400).json({ error: 'ファイルが送信されていません' });
-  //   }
+  // res.send({msg:"posted."});
+  upload.single('file')(req, res, (err) => {
+    console.log("upload");
+    console.log("req listened:"+req);
+    if (err) {
+      res.send({msg:"somethinig went wrong!\nerror:"+err.message});
+      return res.status(400).json({ error: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'ファイルが送信されていません' });
+    }
+    console.log("file confirmed.");
+    const fileId = req.generatedFileId;
 
-  //   const fileId = req.generatedFileId;
+    fileStore.set(fileId, {
+      filePath: req.file.path,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      uploadedAt: new Date().toISOString()
+    });
 
-  //   fileStore.set(fileId, {
-  //     filePath: req.file.path,
-  //     originalName: req.file.originalname,
-  //     mimeType: req.file.mimetype,
-  //     size: req.file.size,
-  //     uploadedAt: new Date().toISOString()
-  //   });
-
-  //   res.status(201).json({ file_id: fileId });
+    res.status(201).json({ file_id: fileId });
   });
 });
 
