@@ -24,19 +24,16 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS設定: localhost:3000（ページを配信するオリジン）からのアクセスを許可
-// app.use(cors({
-//   origin: 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-3000.app.github.dev'
-// }));
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "POST, OPTIONS,GET,DELETE");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200); // iOS対応：OPTIONSにはすぐ200を返す
-  }
-  next();
-});
+// CORS設定: どのオリジン(index.htmlを配信しているCodespaceのポート)からでも
+// アクセスできるようにする。Codespaceごとにポート転送URLのサブドメインが
+// 変わる（例: iOSのCodespacesアプリから開いた場合など）ため、オリジンを
+// 固定せず "*" を許可する。認証情報(Cookie)は使わないため credentials は
+// 有効にしない。
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
 
 // アップロード先ディレクトリ（存在しなければ作成）
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
