@@ -30,7 +30,7 @@ const PORT = process.env.PORT || 5000;
 // }));
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "POST, OPTIONS","GET","DELETE");
+  res.header("Access-Control-Allow-Methods", "POST, OPTIONS,GET,DELETE");
   res.header("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200); // iOS対応：OPTIONSにはすぐ200を返す
