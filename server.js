@@ -147,6 +147,9 @@ app.delete('/files/:file_id', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+// "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
+// GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
+// Bad Gatewayになるケースを避ける。
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`サーバーが起動しました: http://localhost:${PORT}`);
 });
