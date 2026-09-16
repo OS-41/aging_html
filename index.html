@@ -74,6 +74,38 @@
   // 直近にキャプチャしたPNG画像のURL（Blob URL）を保持する変数
   let capturedImageUrl = null;
 
+  /**
+   * バックエンド(server.js)のオリジンを実行時に解決する。
+   * GitHub CodespacesはCodespaceごとにランダムなサブドメイン名
+   * (例: vigilant-acorn-xxxx)が割り当てられ、ポート番号だけが
+   * "-3000"/"-5000"のように末尾に付与される。この名前はCodespaceを
+   * 作り直す度（例: iOSのCodespacesアプリから開いた場合）に変わるため、
+   * バックエンドURLをハードコードすると別のCodespaceでは存在しない
+   * ホストへfetchすることになり "TypeError: Load failed" になる。
+   * そのため、現在ページを開いているオリジンから同じCodespace上の
+   * バックエンド(ポート5000)のオリジンを組み立てる。
+   */
+  function resolveBackendOrigin() {
+    const { protocol, hostname, port, origin } = window.location;
+
+    // 例: vigilant-acorn-xxxx-3000.app.github.dev -> vigilant-acorn-xxxx-5000.app.github.dev
+    const codespacesMatch = hostname.match(/^(.*)-\d+(\.app\.github\.dev|\.githubpreview\.dev|\.preview\.app\.github\.dev)$/);
+    if (codespacesMatch) {
+      return `${protocol}//${codespacesMatch[1]}-5000${codespacesMatch[2]}`;
+    }
+
+    // ローカル環境などポート番号でしか区別できない場合
+    if (port && port !== '5000') {
+      return `${protocol}//${hostname}:5000`;
+    }
+
+    return origin;
+  }
+
+  const BACKEND_ORIGIN = resolveBackendOrigin();
+  const UPLOAD_URL = BACKEND_ORIGIN + '/files';
+  console.log('[config] BACKEND_ORIGIN =', BACKEND_ORIGIN);
+
   const BASE_URL = 'https://yce-api-01.makeupar.com/s2s/v2.0/task/aging';
   const START_METHOD = 'POST';
   const HEADERS = {
@@ -198,27 +230,40 @@
   async function uploadAndGetFileId(blob, uploadUrl, fieldName = 'file') {
     const formData = new FormData();
     formData.append(fieldName, blob, 'capture.jpg');
-    alert("formData");
-    const res = await fetch(uploadUrl, {
-      method: 'POST',
-      body: formData
-    });
-    alert("fetched");
+
+    let res;
+    try {
+      res = await fetch(uploadUrl, {
+        method: 'POST',
+        mode: 'cors',
+        credentials: 'omit',
+        body: formData
+      });
+    } catch (networkErr) {
+      // "TypeError: Load failed"はサーバーに到達すらできていない状態。
+      // 多くの場合、バックエンド(server.js)がまだ起動していないか、
+      // Codespaceの名前が変わってURLが一致していないことが原因。
+      throw new Error(
+        `バックエンド(${uploadUrl})への接続に失敗しました。node server.jsが起動しているか、` +
+        `Codespaceのポート転送URLが正しいか確認してください。詳細: ${networkErr.message}`
+      );
+    }
+
     if (!res.ok) {
       throw new Error(`アップロードに失敗しました: ${res.status}`);
     }
- 
+
     const data = await res.json();
-    alert(data);
     return data.file_id; // APIのレスポンス構造に合わせて調整
   }
 
   test.addEventListener('click', async () => {
     try {
+      status.textContent = 'アップロード中...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      alert("resized: "+ await resizedBlob.text());
-      const fileId = await uploadAndGetFileId(resizedBlob, 'https://vigilant-acorn-vxqrj4rq4pp3w9r4-5000.app.github.dev/files');
-      console.log(fileId);
+      const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
+      console.log('[main] Uploaded file_id:', fileId);
+      status.textContent = 'アップロード完了: ' + fileId;
       // const taskId = await startTask(await getSendableImageUrl());
       // const final = await pollTask(taskId);
       // console.log('[main] Final response:', final);
@@ -226,7 +271,8 @@
       // ctx.drawImage(final.output[0].url, 0, 0, canvas.width, canvas.height);
     } catch (e) {
       console.error('[main] Flow error:', e);
-      alert("Sorry, something went wrong:\n"+e);
+      status.textContent = 'エラー: ' + e.message;
+      alert('Sorry, something went wrong:\n' + e.message);
     }
   });
   startBtn.addEventListener('click', async () => {
