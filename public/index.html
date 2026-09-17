@@ -40,7 +40,8 @@
   button:hover {
     background: #333;
   }
-  #canvas2 {
+  /* 撮影時は非表示のまま描画に使い、aging結果を表示するときだけ見せる */
+  #canvas {
     max-width: 640px;
     width: 100%;
     border-radius: 8px;
@@ -48,7 +49,7 @@
     margin-top: 1rem;
   }
   /* 単一表示では縦長の画像でもスライダーが画面外に出ないよう高さを抑える */
-  #canvas2.single {
+  #canvas.single {
     width: auto;
     max-width: 100%;
     max-height: 60vh;
@@ -85,8 +86,8 @@
   <h1>Webカメラ映像</h1>
   <p id="status">カメラは停止中です</p>
   <video id="video" autoplay playsinline></video>
-  <canvas id="canvas" style="display:none;"></canvas>
-  <canvas id="canvas2"></canvas>
+  <!-- 撮影時のフレーム取り込みと、aging結果の表示の両方に使う -->
+  <canvas id="canvas"></canvas>
   <div id="resultControls">
     <button type="button" id="viewModeBtn">単一表示に切り替え</button>
     <div id="sliderRow">
@@ -107,7 +108,6 @@
 <script>
   const video = document.getElementById('video');
   const canvas = document.getElementById('canvas');
-  const canvas2 = document.getElementById('canvas2');
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
   const captureBtn = document.getElementById('captureBtn');
@@ -361,7 +361,7 @@
   }
 
   /**
-   * 読み込み済みの結果画像をすべてグリッド状に#canvas2へ描画する。
+   * 読み込み済みの結果画像をすべてグリッド状に#canvasへ描画する。
    */
   function drawGrid() {
     const CELL_SIZE = 200;
@@ -369,12 +369,12 @@
     const cols = Math.ceil(Math.sqrt(agingImages.length));
     const rows = Math.ceil(agingImages.length / cols);
 
-    canvas2.width = cols * CELL_SIZE + (cols + 1) * PADDING;
-    canvas2.height = rows * CELL_SIZE + (rows + 1) * PADDING;
+    canvas.width = cols * CELL_SIZE + (cols + 1) * PADDING;
+    canvas.height = rows * CELL_SIZE + (rows + 1) * PADDING;
 
-    const ctx = canvas2.getContext('2d');
+    const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#1e1e1e';
-    ctx.fillRect(0, 0, canvas2.width, canvas2.height);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     agingImages.forEach((img, i) => {
       const boxX = PADDING + (i % cols) * (CELL_SIZE + PADDING);
@@ -387,19 +387,19 @@
   }
 
   /**
-   * 指定した1枚だけを#canvas2へ描画する。
+   * 指定した1枚だけを#canvasへ描画する。
    * @param {number} index - agingOutput内のインデックス
    */
   function drawSingle(index) {
     const img = agingImages[index];
     if (!img) return;
 
-    canvas2.width = img.naturalWidth;
-    canvas2.height = img.naturalHeight;
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
 
-    const ctx = canvas2.getContext('2d');
+    const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#1e1e1e';
-    ctx.fillRect(0, 0, canvas2.width, canvas2.height);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
   }
 
@@ -420,7 +420,7 @@
   }
 
   /**
-   * 現在の表示モード(グリッド/単一)に合わせて#canvas2とコントロールを更新する。
+   * 現在の表示モード(グリッド/単一)に合わせて#canvasとコントロールを更新する。
    */
   function renderResults() {
     if (viewMode === 'grid') {
@@ -434,8 +434,19 @@
       sliderRow.style.display = 'flex';
       viewModeBtn.textContent = 'グリッド表示に切り替え';
     }
-    canvas2.classList.toggle('single', viewMode === 'single');
-    canvas2.style.display = 'block';
+    canvas.classList.toggle('single', viewMode === 'single');
+    canvas.style.display = 'block';
+  }
+
+  /**
+   * aging結果の表示を隠す。#canvasは撮影の作業用と兼用のため、
+   * 結果表示をやめるときはコントロールごと隠す。
+   */
+  function hideResults() {
+    resultControls.style.display = 'none';
+    sliderRow.style.display = 'none';
+    canvas.classList.remove('single');
+    canvas.style.display = 'none';
   }
 
   /**
@@ -474,8 +485,7 @@
 
   test.addEventListener('click', async () => {
     try {
-      resultControls.style.display = 'none';
-      canvas2.style.display = 'none';
+      hideResults();
       status.textContent = 'resizing...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
       status.textContent = 'uploading...';
@@ -523,6 +533,11 @@
 
   captureBtn.addEventListener('click', () => {
     if (!stream) return;
+
+    // #canvasは撮影の作業用と結果表示を兼ねるため、前回のaging結果が
+    // 表示されたままなら隠してから撮影分を描き込む。
+    hideResults();
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
