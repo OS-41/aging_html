@@ -47,7 +47,7 @@
   <p id="status">カメラは停止中です</p>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas" style="display:none;"></canvas>
-  <!-- <canvas id="canvas2" style="display:none;"></canvas> -->
+  <canvas id="canvas2" style="max-width:640px; width:100%; border-radius:8px; display:none; margin-top:1rem;"></canvas>
   <div>
     <button id="startBtn">カメラを開始</button>
     <button id="captureBtn" disabled>PNGとして保存</button>
@@ -251,6 +251,26 @@
     return data.file_id; // APIのレスポンス構造に合わせて調整
   }
 
+  /**
+   * 画像URLを読み込み、#canvas2に描画して表示する。
+   * @param {string} imageUrl - 描画する画像のURL
+   */
+  function drawImageUrlToCanvas2(imageUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        canvas2.width = img.naturalWidth;
+        canvas2.height = img.naturalHeight;
+        canvas2.getContext('2d').drawImage(img, 0, 0);
+        canvas2.style.display = 'block';
+        resolve();
+      };
+      img.onerror = () => reject(new Error(`結果画像の読み込みに失敗しました: ${imageUrl}`));
+      img.src = imageUrl;
+    });
+  }
+
   test.addEventListener('click', async () => {
     try {
       status.textContent = 'resizing...';
@@ -268,8 +288,8 @@
 
       const resultUrl = final?.data?.results?.[0];
       if (resultUrl) {
-        preview.src = resultUrl;
-        preview.style.display = 'block';
+        status.textContent = '結果画像を読み込み中...';
+        await drawImageUrlToCanvas2(resultUrl);
       }
       status.textContent = 'aging処理が完了しました';
     } catch (e) {
