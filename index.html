@@ -157,7 +157,8 @@
         return payload;
       }
       if (status === 'error') {
-        throw new Error('Task failed: ' + JSON.stringify(payload));
+        const detail = payload?.data?.error_message || payload?.data?.error || JSON.stringify(payload);
+        throw new Error('Task failed: ' + detail);
       }
 
       await sleep(intervalMs);
@@ -257,23 +258,77 @@
   }
 
   /**
-   * 画像URLを読み込み、#canvas2に描画して表示する。
-   * @param {string} imageUrl - 描画する画像のURL
+   * 画像URLを読み込む。
+   * @param {string} imageUrl
+   * @returns {Promise<HTMLImageElement>}
    */
-  function drawImageUrlToCanvas2(imageUrl) {
+  function loadImage(imageUrl) {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        canvas2.width = img.naturalWidth;
-        canvas2.height = img.naturalHeight;
-        canvas2.getContext('2d').drawImage(img, 0, 0);
-        canvas2.style.display = 'block';
-        resolve();
-      };
+      img.onload = () => resolve(img);
       img.onerror = () => reject(new Error(`結果画像の読み込みに失敗しました: ${imageUrl}`));
       img.src = imageUrl;
     });
+  }
+
+  /**
+   * 画像を指定した箱(box)に収まるよう、アスペクト比を保ったまま
+   * 中央寄せするための描画矩形を計算する(いわゆる"contain")。
+   */
+  function containRect(imgW, imgH, boxX, boxY, boxW, boxH) {
+    const scale = Math.min(boxW / imgW, boxH / imgH);
+    const w = imgW * scale;
+    const h = imgH * scale;
+    return { x: boxX + (boxW - w) / 2, y: boxY + (boxH - h) / 2, w, h };
+  }
+
+  /**
+   * aging APIのresults.output([{ url, res_age }, ...])をグリッド状に
+   * #canvas2へ描画する。各セルには結果画像と推定年齢のラベルを表示する。
+   * @param {Array<{url: string, res_age: number}>} output
+   */
+  async function drawOutputGridToCanvas2(output) {
+    if (!output || output.length === 0) {
+      throw new Error('描画する結果画像がありません');
+    }
+
+    const images = await Promise.all(output.map((item) => loadImage(item.url)));
+
+    const CELL_SIZE = 200;
+    const PADDING = 8;
+    const cols = Math.ceil(Math.sqrt(output.length));
+    const rows = Math.ceil(output.length / cols);
+
+    canvas2.width = cols * CELL_SIZE + (cols + 1) * PADDING;
+    canvas2.height = rows * CELL_SIZE + (rows + 1) * PADDING;
+
+    const ctx = canvas2.getContext('2d');
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, 0, canvas2.width, canvas2.height);
+
+    images.forEach((img, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const boxX = PADDING + col * (CELL_SIZE + PADDING);
+      const boxY = PADDING + row * (CELL_SIZE + PADDING);
+
+      const rect = containRect(img.naturalWidth, img.naturalHeight, boxX, boxY, CELL_SIZE, CELL_SIZE);
+      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
+
+      const resAge = output[i]?.res_age;
+      if (resAge !== undefined) {
+        const label = `${resAge}歳`;
+        ctx.font = '16px sans-serif';
+        const textWidth = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillRect(boxX, boxY + CELL_SIZE - 22, textWidth + 8, 22);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, boxX + 4, boxY + CELL_SIZE - 6);
+      }
+    });
+
+    canvas2.style.display = 'block';
   }
 
   test.addEventListener('click', async () => {
@@ -291,10 +346,10 @@
       const final = await pollTask(taskId);
       console.log('[main] Final response:', final);
 
-      const resultUrl = final?.data?.results?.[0];
-      if (resultUrl) {
+      const output = final?.data?.results?.output;
+      if (output && output.length > 0) {
         status.textContent = '結果画像を読み込み中...';
-        await drawImageUrlToCanvas2(resultUrl);
+        await drawOutputGridToCanvas2(output);
       }
       status.textContent = 'aging処理が完了しました';
     } catch (e) {
