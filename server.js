@@ -170,14 +170,16 @@ app.delete('/files/:file_id', (req, res) => {
  */
 app.post('/api/aging/start/:file_id', async (req, res) => {
   if (!AGING_API_KEY) {
+    console.log("AGING_API_KEY is not available. process discontinued");
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
-
+  console.log("AGING_API_KEY is available.");
   const fileInfo = fileStore.get(req.params.file_id);
   if (!fileInfo) {
+    console.log("Specified file_id is not available. process discontinued");
     return res.status(404).json({ error: '指定されたfile_idは存在しません' });
   }
-
+  console.log("file_id is available.\ntry api fetch");
   const srcFileUrl = `${req.protocol}://${req.get('host')}/files/${req.params.file_id}`;
 
   try {
@@ -192,10 +194,12 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
         src_file_url: srcFileUrl
       })
     });
-
+    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
+    console.log("process finished.\nreturn data");
     res.status(apiRes.status).json(payload);
   } catch (err) {
+    console.log("Error occurred! Detail:\n"+err);
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });
@@ -208,16 +212,18 @@ app.get('/api/aging/:taskId', async (req, res) => {
   if (!AGING_API_KEY) {
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
-
+  console.log("AGING_API_KEY is available.\ntry api fetch");
   try {
     const apiRes = await fetch(`${AGING_API_BASE_URL}/${req.params.taskId}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${AGING_API_KEY}` }
     });
-
+    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
+    console.log("process finished.\nreturn data");
     res.status(apiRes.status).json(payload);
   } catch (err) {
+    console.log("Error occurred! Detail:\n"+err);
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });
