@@ -114,10 +114,15 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // fileId: POST /files で取得済みのfile_id(aging対象画像はサーバーが
-  // 保持しているため、クライアントからは画像本体を再送する必要はない)
+  // 保持しているため、クライアントからは画像本体を再送する必要はない)。
+  // サーバー側はリクエストのHostヘッダーから公開URLを正しく復元できない
+  // (Codespacesの転送プロキシ経由だとlocalhostになってしまう)ため、
+  // ブラウザが把握しているBACKEND_ORIGINをbodyで渡す。
   async function startTask(fileId) {
     const res = await fetch(`${AGING_START_URL}/${fileId}`, {
-      method: 'POST'
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ origin: BACKEND_ORIGIN })
     });
     if (!res.ok) {
       throw new Error(`Start request failed: ${res.status} ${res.statusText}`);

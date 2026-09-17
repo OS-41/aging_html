@@ -163,10 +163,13 @@ app.delete('/files/:file_id', (req, res) => {
  * 事前に POST /files でアップロード済みの file_id を指定してaging APIへ
  * タスク開始をリクエストするプロキシ。
  * aging API自体は画像バイナリではなく「外部から取得可能なURL」を要求するため、
- * このサーバーがホストしている GET /files/:file_id のURLを、リクエストの
- * Hostヘッダー(Codespacesのポート転送プロキシが設定する外部向けホスト名)から
- * 組み立ててsrc_file_urlとして渡す。APIキーはクライアントに渡さず、
- * ここ(サーバー側)でのみ.envから読んで付与する。
+ * このサーバーがホストしている GET /files/:file_id のURLをsrc_file_urlとして
+ * 渡す必要がある。GitHub Codespacesのポート転送プロキシ経由だとリクエストの
+ * Hostヘッダーが"localhost"に書き換えられてしまい外部から到達できないURLに
+ * なってしまうため、ブラウザ側が既に把握している転送後の公開オリジンを
+ * body.origin として送ってもらい、それを使って組み立てる。
+ * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
+ * body: { "origin": "https://xxxx-5000.app.github.dev" }
  */
 app.post('/api/aging/start/:file_id', async (req, res) => {
   if (!AGING_API_KEY) {
@@ -180,7 +183,13 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
     return res.status(404).json({ error: '指定されたfile_idは存在しません' });
   }
   console.log("file_id is available.\ntry api fetch");
-  const srcFileUrl = `${req.protocol}://${req.get('host')}/files/${req.params.file_id}`;
+
+  const origin = req.body?.origin;
+  if (!origin) {
+    return res.status(400).json({ error: 'body.originが指定されていません(公開URLのオリジンが必要です)' });
+  }
+
+  const srcFileUrl = `${origin}/files/${req.params.file_id}`;
 
   try {
     const apiRes = await fetch(AGING_API_BASE_URL, {
