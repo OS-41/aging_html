@@ -12,8 +12,8 @@
  *   POST /files   画像をアップロードし、file_idを返す
  *   GET  /files/:file_id   file_idに対応する画像を返す
  *   DELETE /files/:file_id file_idに対応する画像を削除する
- *   POST /api/aging/start        aging APIへタスクを開始する(APIキーはサーバー側の.envから使用)
- *   GET  /api/aging/:taskId      aging APIのタスク状況をポーリングする
+ *   POST /api/aging/start/:file_id  アップロード済みfile_idを元にaging APIへタスクを開始する(APIキーはサーバー側の.envから使用)
+ *   GET  /api/aging/:taskId         aging APIのタスク状況をポーリングする
  *
  * APIキーはリポジトリに含めず、.env(.gitignore対象)の AGING_API_KEY に設定する。
  * .env.example を参考にすること。
@@ -159,18 +159,30 @@ app.delete('/files/:file_id', (req, res) => {
 });
 
 /**
- * POST /api/aging/start
- * aging APIへタスク開始をリクエストするプロキシ。
- * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
- * body: { "src_file_url": "..." }
+ * POST /api/aging/start/:file_id
+ * 事前に POST /files でアップロード済みの file_id を指定してaging APIへ
+ * タスク開始をリクエストするプロキシ。
+ * aging API自体は画像バイナリではなく「外部から取得可能なURL」を要求するため、
+ * このサーバーがホストしている GET /files/:file_id のURLを、リクエストの
+ * Hostヘッダー(Codespacesのポート転送プロキシが設定する外部向けホスト名)から
+ * 組み立ててsrc_file_urlとして渡す。APIキーはクライアントに渡さず、
+ * ここ(サーバー側)でのみ.envから読んで付与する。
  */
 app.post('/api/aging/start/:file_id', async (req, res) => {
   if (!AGING_API_KEY) {
+    console.log("AGING_API_KEY is not available. process discontinued");
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
+  console.log("AGING_API_KEY is available.");
+  const fileInfo = fileStore.get(req.params.file_id);
+  if (!fileInfo) {
+    console.log("Specified file_id is not available. process discontinued");
+    return res.status(404).json({ error: '指定されたfile_idは存在しません' });
+  }
+  console.log("file_id is available.\ntry api fetch");
+  const srcFileUrl = `${req.protocol}://${req.get('host')}/files/${req.params.file_id}`;
 
   try {
-  const fileInfo = fileStore.get(req.params.file_id);
     const apiRes = await fetch(AGING_API_BASE_URL, {
       method: 'POST',
       headers: {
@@ -179,13 +191,15 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
       },
       body: JSON.stringify({
         request_id: 0,
-        src_file_url: req.body?.src_file_url
+        src_file_url: srcFileUrl
       })
     });
-
+    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
+    console.log("process finished.\nreturn data");
     res.status(apiRes.status).json(payload);
   } catch (err) {
+    console.log("Error occurred! Detail:\n"+err);
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });
@@ -198,16 +212,18 @@ app.get('/api/aging/:taskId', async (req, res) => {
   if (!AGING_API_KEY) {
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
-
+  console.log("AGING_API_KEY is available.\ntry api fetch");
   try {
     const apiRes = await fetch(`${AGING_API_BASE_URL}/${req.params.taskId}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${AGING_API_KEY}` }
     });
-
+    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
+    console.log("process finished.\nreturn data");
     res.status(apiRes.status).json(payload);
   } catch (err) {
+    console.log("Error occurred! Detail:\n"+err);
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });

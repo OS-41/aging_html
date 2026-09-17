@@ -47,7 +47,7 @@
   <p id="status">カメラは停止中です</p>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas" style="display:none;"></canvas>
-  <!-- <canvas id="canvas2" style="display:none;"></canvas> -->
+  <canvas id="canvas2" style="max-width:640px; width:100%; border-radius:8px; display:none; margin-top:1rem;"></canvas>
   <div>
     <button id="startBtn">カメラを開始</button>
     <button id="captureBtn" disabled>PNGとして保存</button>
@@ -112,11 +112,12 @@
   const AGING_START_URL = BACKEND_ORIGIN + '/api/aging/start';
   const AGING_POLL_URL = BACKEND_ORIGIN + '/api/aging';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  async function startTask(image) {
-    const res = await fetch(AGING_START_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ src_file_url: image }),
+
+  // fileId: POST /files で取得済みのfile_id(aging対象画像はサーバーが
+  // 保持しているため、クライアントからは画像本体を再送する必要はない)
+  async function startTask(fileId) {
+    const res = await fetch(`${AGING_START_URL}/${fileId}`, {
+      method: 'POST'
     });
     if (!res.ok) {
       throw new Error(`Start request failed: ${res.status} ${res.statusText}`);
@@ -250,25 +251,50 @@
     return data.file_id; // APIのレスポンス構造に合わせて調整
   }
 
+  /**
+   * 画像URLを読み込み、#canvas2に描画して表示する。
+   * @param {string} imageUrl - 描画する画像のURL
+   */
+  function drawImageUrlToCanvas2(imageUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        canvas2.width = img.naturalWidth;
+        canvas2.height = img.naturalHeight;
+        canvas2.getContext('2d').drawImage(img, 0, 0);
+        canvas2.style.display = 'block';
+        resolve();
+      };
+      img.onerror = () => reject(new Error(`結果画像の読み込みに失敗しました: ${imageUrl}`));
+      img.src = imageUrl;
+    });
+  }
+
   test.addEventListener('click', async () => {
     try {
       status.textContent = 'resizing...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      status.textContent = "fetching...";
+      status.textContent = 'uploading...';
       const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
       console.log('[main] Uploaded file_id:', fileId);
-      status.textContent = 'アップロード完了: ' + fileId;
-      // const taskId = await startTask(await getSendableImageUrl());
-      // const final = await pollTask(taskId);
-      // console.log('[main] Final response:', final);
-      // const ctx = canvas2.getContext('2d');
-      // ctx.drawImage(final.output[0].url, 0, 0, canvas.width, canvas.height);
+
+      status.textContent = 'aging処理を開始しています...';
+      const taskId = await startTask(fileId);
+
+      status.textContent = 'aging処理を実行中です...';
+      const final = await pollTask(taskId);
+      console.log('[main] Final response:', final);
+
+      const resultUrl = final?.data?.results?.[0];
+      if (resultUrl) {
+        status.textContent = '結果画像を読み込み中...';
+        await drawImageUrlToCanvas2(resultUrl);
+      }
+      status.textContent = 'aging処理が完了しました';
     } catch (e) {
       console.error('[main] Flow error:', e);
       status.textContent = 'エラー: ' + e.message;
-      setTimeout(() => {
-        alert("Error!");
-      }, 30000);
     }
   });
   startBtn.addEventListener('click', async () => {
@@ -317,7 +343,6 @@
       downloadLink.style.display = 'inline-block';
 
       status.textContent = 'PNG画像をimgタグに描画しました';
-      alert(capturedImageUrl.slice(5,capturedImageUrl.length-1));
     }, 'image/png');
     test.disabled=false;
   });
