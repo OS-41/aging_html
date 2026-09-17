@@ -44,6 +44,7 @@
 </head>
 <body>
   <h1>Webカメラ映像</h1>
+  <p id="status">カメラは停止中です</p>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas" style="display:none;"></canvas>
   <!-- <canvas id="canvas2" style="display:none;"></canvas> -->
@@ -51,10 +52,9 @@
     <button id="startBtn">カメラを開始</button>
     <button id="captureBtn" disabled>PNGとして保存</button>
     <form>
-      <button id="test" disabled>test</button>
+      <button type="button" id="test" disabled>test</button>
     </form>
   </div>
-  <p id="status">カメラは停止中です</p>
   <img id="preview" style="max-width:640px; width:100%; display:none; border-radius:8px; margin-top:1rem;">
   <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>この画像をダウンロード</a>
 
@@ -252,8 +252,9 @@
 
   test.addEventListener('click', async () => {
     try {
-      status.textContent = 'アップロード中...';
+      status.textContent = 'resizing...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
+      status.textContent = "fetching...";
       const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
       console.log('[main] Uploaded file_id:', fileId);
       status.textContent = 'アップロード完了: ' + fileId;
@@ -265,7 +266,9 @@
     } catch (e) {
       console.error('[main] Flow error:', e);
       status.textContent = 'エラー: ' + e.message;
-      alert('Sorry, something went wrong:\n' + e.message);
+      setTimeout(() => {
+        alert("Error!");
+      }, 30000);
     }
   });
   startBtn.addEventListener('click', async () => {

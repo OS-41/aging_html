@@ -164,12 +164,13 @@ app.delete('/files/:file_id', (req, res) => {
  * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
  * body: { "src_file_url": "..." }
  */
-app.post('/api/aging/start', async (req, res) => {
+app.post('/api/aging/start/:file_id', async (req, res) => {
   if (!AGING_API_KEY) {
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
 
   try {
+  const fileInfo = fileStore.get(req.params.file_id);
     const apiRes = await fetch(AGING_API_BASE_URL, {
       method: 'POST',
       headers: {
