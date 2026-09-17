@@ -8,6 +8,10 @@
  *   node server.js
  *   -> http://localhost:5000 で待ち受け
  *
+ * フロントエンド(public/index.html)の配信は `npx serve public` で行う。
+ * リポジトリのルートを静的配信すると .env / .git / uploads まで公開されて
+ * しまうため、公開してよいファイルだけを置いた public/ 配下のみを配信する。
+ *
  * エンドポイント:
  *   POST /files   画像をアップロードし、file_idを返す
  *   GET  /files/:file_id   file_idに対応する画像を返す
@@ -33,6 +37,42 @@ const PORT = process.env.PORT || 5000;
 const AGING_API_BASE_URL = 'https://yce-api-01.makeupar.com/s2s/v2.0/task/aging';
 const AGING_API_KEY = process.env.AGING_API_KEY;
 
+// このサーバーの公開URL。設定されていればクライアント申告のoriginより優先する。
+const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN;
+
+/**
+ * aging APIに渡すsrc_file_urlの組み立てに使う公開オリジンを決定する。
+ * クライアントから受け取った値をそのまま信用すると、外部APIに任意のURLを
+ * 取得させる踏み台(SSRF)にできてしまうため、許可された形式のみ受け入れる。
+ * @param {unknown} candidate - クライアントが申告したorigin
+ * @returns {string|null} 使用してよいオリジン。許可できない場合はnull
+ */
+function resolvePublicOrigin(candidate) {
+  if (PUBLIC_ORIGIN) {
+    return PUBLIC_ORIGIN.replace(/\/+$/, '');
+  }
+
+  if (typeof candidate !== 'string') {
+    return null;
+  }
+
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  // パスやクエリ、認証情報が付いたものはオリジンとして受け付けない
+  if (url.origin !== candidate.replace(/\/+$/, '')) {
+    return null;
+  }
+
+  const isCodespaces = url.protocol === 'https:' && /\.app\.github\.dev$/.test(url.hostname);
+  const isLocal = ['localhost', '127.0.0.1'].includes(url.hostname);
+  return isCodespaces || isLocal ? url.origin : null;
+}
+
 app.use(express.json());
 
 // CORS設定: どのオリジン(index.htmlを配信しているCodespaceのポート)からでも
@@ -55,6 +95,40 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 // file_id -> ファイル情報 の対応表（本番運用ではDB等に置き換える想定）
 const fileStore = new Map();
 
+// アップロードは認証なしで受け付けるため、保持上限と保持期間を設けて
+// ディスクを使い切られること(DoS)と、顔写真が無期限に残ることを防ぐ。
+const MAX_STORED_FILES = 100;
+const FILE_TTL_MS = 30 * 60 * 1000; // 30分
+
+function deleteStoredFile(fileId) {
+  const fileInfo = fileStore.get(fileId);
+  if (!fileInfo) return;
+  fileStore.delete(fileId);
+  fs.unlink(fileInfo.filePath, (err) => {
+    if (err && err.code !== 'ENOENT') {
+      console.log(`ファイル削除に失敗しました(${fileId}): ${err.message}`);
+    }
+  });
+}
+
+// 期限切れのファイルを定期的に削除する
+setInterval(() => {
+  const expiry = Date.now() - FILE_TTL_MS;
+  for (const [fileId, fileInfo] of fileStore) {
+    if (fileInfo.uploadedAtMs < expiry) {
+      deleteStoredFile(fileId);
+    }
+  }
+}, 60 * 1000).unref();
+
+// 再起動時はfileStoreが空になり、uploads/内のファイルは参照不能な
+// 孤児として残り続けるため、起動時にまとめて削除する。
+for (const entry of fs.readdirSync(UPLOAD_DIR, { withFileTypes: true })) {
+  if (entry.isFile()) {
+    fs.unlinkSync(path.join(UPLOAD_DIR, entry.name));
+  }
+}
+
 // multerの設定
 // - ファイル名: file_id（拡張子はjpg固定。クライアント側でjpegにリサイズ済み前提）
 // - サイズ上限: 10MB（クライアント側のリサイズと合わせる）
@@ -70,10 +144,13 @@ const upload = multer({
     }
   }),
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB
+    fileSize: 10 * 1024 * 1024, // 10MB
+    files: 1
   },
   fileFilter: (req, file, cb) => {
     // jpg/jpeg以外は拒否
+    // ※ ここで見ているmimetypeはクライアントの自己申告であり、実体が
+    //   JPEGであることは保存後にマジックバイトで検証する。
     const allowed = ['image/jpeg'];
     if (!allowed.includes(file.mimetype)) {
       return cb(new Error('jpg/jpeg形式の画像のみアップロード可能です'));
@@ -81,6 +158,22 @@ const upload = multer({
     cb(null, true);
   }
 });
+
+/**
+ * 保存されたファイルの先頭がJPEGのマジックバイト(FF D8 FF)かを検証する。
+ * Content-Typeは詐称できるため、実体が画像であることを確認して
+ * HTML等の別形式のコンテンツをホストさせられるのを防ぐ。
+ */
+function isJpegFile(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const header = Buffer.alloc(3);
+    const bytesRead = fs.readSync(fd, header, 0, 3, 0);
+    return bytesRead === 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 /**
  * POST /files
@@ -93,26 +186,36 @@ app.get('/',(req,res) => {
 })
 app.post('/files', (req, res) => {
   console.log("posted.");
-  // res.send({msg:"posted."});
   upload.single('file')(req, res, (err) => {
     console.log("upload");
-    console.log("req listened:"+req);
     if (err) {
-      res.send({msg:"somethinig went wrong!\nerror:"+err.message});
       return res.status(400).json({ error: err.message });
     }
     if (!req.file) {
       return res.status(400).json({ error: 'ファイルが送信されていません' });
     }
+
+    if (!isJpegFile(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
+    }
+
+    if (fileStore.size >= MAX_STORED_FILES) {
+      fs.unlinkSync(req.file.path);
+      return res.status(507).json({ error: '保存できるファイル数の上限に達しています。しばらく待ってから再試行してください' });
+    }
+
     console.log("file confirmed.");
     const fileId = req.generatedFileId;
+    const uploadedAtMs = Date.now();
 
     fileStore.set(fileId, {
       filePath: req.file.path,
       originalName: req.file.originalname,
       mimeType: req.file.mimetype,
       size: req.file.size,
-      uploadedAt: new Date().toISOString()
+      uploadedAtMs,
+      uploadedAt: new Date(uploadedAtMs).toISOString()
     });
 
     res.status(201).json({ file_id: fileId });
@@ -135,6 +238,8 @@ app.get('/files/:file_id', (req, res) => {
   }
 
   res.setHeader('Content-Type', fileInfo.mimeType);
+  // 万一JPEG以外の内容が紛れ込んでも、ブラウザに別形式として解釈させない
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile(fileInfo.filePath);
 });
 
@@ -168,6 +273,10 @@ app.delete('/files/:file_id', (req, res) => {
  * Hostヘッダーが"localhost"に書き換えられてしまい外部から到達できないURLに
  * なってしまうため、ブラウザ側が既に把握している転送後の公開オリジンを
  * body.origin として送ってもらい、それを使って組み立てる。
+ * ただしbody.originはクライアントが自由に指定できてしまうため、そのまま
+ * 外部APIに渡すと任意のURLを取得させる踏み台(SSRF)にできてしまう。
+ * .envのPUBLIC_ORIGINが設定されていればそれを優先し、無い場合でも
+ * Codespacesの転送URLかローカル開発用のホストのみを許可する。
  * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
  * body: { "origin": "https://xxxx-5000.app.github.dev" }
  */
@@ -184,9 +293,9 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
   }
   console.log("file_id is available.\ntry api fetch");
 
-  const origin = req.body?.origin;
+  const origin = resolvePublicOrigin(req.body?.origin);
   if (!origin) {
-    return res.status(400).json({ error: 'body.originが指定されていません(公開URLのオリジンが必要です)' });
+    return res.status(400).json({ error: '許可されていないoriginです(Codespacesの転送URLを指定してください)' });
   }
 
   const srcFileUrl = `${origin}/files/${req.params.file_id}`;
