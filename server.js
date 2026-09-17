@@ -12,6 +12,11 @@
  *   POST /files   画像をアップロードし、file_idを返す
  *   GET  /files/:file_id   file_idに対応する画像を返す
  *   DELETE /files/:file_id file_idに対応する画像を削除する
+ *   POST /api/aging/start        aging APIへタスクを開始する(APIキーはサーバー側の.envから使用)
+ *   GET  /api/aging/:taskId      aging APIのタスク状況をポーリングする
+ *
+ * APIキーはリポジトリに含めず、.env(.gitignore対象)の AGING_API_KEY に設定する。
+ * .env.example を参考にすること。
  */
 
 const express = require('express');
@@ -20,9 +25,15 @@ const cors = require('cors');
 const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+const AGING_API_BASE_URL = 'https://yce-api-01.makeupar.com/s2s/v2.0/task/aging';
+const AGING_API_KEY = process.env.AGING_API_KEY;
+
+app.use(express.json());
 
 // CORS設定: どのオリジン(index.htmlを配信しているCodespaceのポート)からでも
 // アクセスできるようにする。Codespaceごとにポート転送URLのサブドメインが
@@ -145,6 +156,59 @@ app.delete('/files/:file_id', (req, res) => {
     fileStore.delete(req.params.file_id);
     res.status(204).send();
   });
+});
+
+/**
+ * POST /api/aging/start
+ * aging APIへタスク開始をリクエストするプロキシ。
+ * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
+ * body: { "src_file_url": "..." }
+ */
+app.post('/api/aging/start', async (req, res) => {
+  if (!AGING_API_KEY) {
+    return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
+  }
+
+  try {
+    const apiRes = await fetch(AGING_API_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${AGING_API_KEY}`
+      },
+      body: JSON.stringify({
+        request_id: 0,
+        src_file_url: req.body?.src_file_url
+      })
+    });
+
+    const payload = await apiRes.json().catch(() => ({}));
+    res.status(apiRes.status).json(payload);
+  } catch (err) {
+    res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
+  }
+});
+
+/**
+ * GET /api/aging/:taskId
+ * aging APIのタスク状況をポーリングするプロキシ。
+ */
+app.get('/api/aging/:taskId', async (req, res) => {
+  if (!AGING_API_KEY) {
+    return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
+  }
+
+  try {
+    const apiRes = await fetch(`${AGING_API_BASE_URL}/${req.params.taskId}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${AGING_API_KEY}` }
+    });
+
+    const payload = await apiRes.json().catch(() => ({}));
+    res.status(apiRes.status).json(payload);
+  } catch (err) {
+    res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
+  }
 });
 
 // "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
