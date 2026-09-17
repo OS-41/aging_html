@@ -40,6 +40,45 @@
   button:hover {
     background: #333;
   }
+  #canvas2 {
+    max-width: 640px;
+    width: 100%;
+    border-radius: 8px;
+    display: none;
+    margin-top: 1rem;
+  }
+  /* 単一表示では縦長の画像でもスライダーが画面外に出ないよう高さを抑える */
+  #canvas2.single {
+    width: auto;
+    max-width: 100%;
+    max-height: 60vh;
+  }
+  #resultControls {
+    width: 100%;
+    max-width: 640px;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+  }
+  #sliderRow {
+    width: 100%;
+    display: none;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+  #imageSlider {
+    flex: 1;
+    min-width: 0;
+  }
+  #ageLabel {
+    font-size: 0.95rem;
+    white-space: nowrap;
+  }
+  #currentMark {
+    color: #6cf;
+    font-size: 0.85rem;
+  }
 </style>
 </head>
 <body>
@@ -47,7 +86,14 @@
   <p id="status">カメラは停止中です</p>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas" style="display:none;"></canvas>
-  <canvas id="canvas2" style="max-width:640px; width:100%; border-radius:8px; display:none; margin-top:1rem;"></canvas>
+  <canvas id="canvas2"></canvas>
+  <div id="resultControls">
+    <button type="button" id="viewModeBtn">単一表示に切り替え</button>
+    <div id="sliderRow">
+      <input type="range" id="imageSlider" min="0" max="0" step="1" value="0">
+      <span id="ageLabel"></span>
+    </div>
+  </div>
   <div>
     <button id="startBtn">カメラを開始</button>
     <button id="captureBtn" disabled>PNGとして保存</button>
@@ -68,11 +114,25 @@
   const preview = document.getElementById('preview');
   const downloadLink = document.getElementById('downloadLink');
   const test = document.getElementById('test');
+  const resultControls = document.getElementById('resultControls');
+  const viewModeBtn = document.getElementById('viewModeBtn');
+  const sliderRow = document.getElementById('sliderRow');
+  const imageSlider = document.getElementById('imageSlider');
+  const ageLabel = document.getElementById('ageLabel');
 
   let capturedBlob =null;
   let stream = null;
   // 直近にキャプチャしたPNG画像のURL（Blob URL）を保持する変数
   let capturedImageUrl = null;
+
+  // aging結果の表示状態
+  // agingOutput: aging APIのresults.output([{ url, res_age }, ...])
+  // agingImages: agingOutputと同じ並びで読み込み済みのImage要素
+  // uploadedIndex: agingOutput内でアップロードした画像が何番目か(results.age_idx)
+  let agingOutput = [];
+  let agingImages = [];
+  let uploadedIndex = -1;
+  let viewMode = 'grid';
 
   /**
    * バックエンド(server.js)のオリジンを実行時に解決する。
@@ -284,21 +344,30 @@
   }
 
   /**
-   * aging APIのresults.output([{ url, res_age }, ...])をグリッド状に
-   * #canvas2へ描画する。各セルには結果画像と推定年齢のラベルを表示する。
-   * @param {Array<{url: string, res_age: number}>} output
+   * セルの左下に年齢ラベルを描画する。アップロードした画像には
+   * それと分かる文言を併記する。
    */
-  async function drawOutputGridToCanvas2(output) {
-    if (!output || output.length === 0) {
-      throw new Error('描画する結果画像がありません');
-    }
+  function drawAgeLabel(ctx, index, boxX, boxBottom) {
+    const resAge = agingOutput[index]?.res_age;
+    if (resAge === undefined) return;
 
-    const images = await Promise.all(output.map((item) => loadImage(item.url)));
+    const label = index === uploadedIndex ? `${resAge}歳 (現在のあなた)` : `${resAge}歳`;
+    ctx.font = '16px sans-serif';
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(boxX, boxBottom - 22, textWidth + 8, 22);
+    ctx.fillStyle = index === uploadedIndex ? '#6cf' : '#fff';
+    ctx.fillText(label, boxX + 4, boxBottom - 6);
+  }
 
+  /**
+   * 読み込み済みの結果画像をすべてグリッド状に#canvas2へ描画する。
+   */
+  function drawGrid() {
     const CELL_SIZE = 200;
     const PADDING = 8;
-    const cols = Math.ceil(Math.sqrt(output.length));
-    const rows = Math.ceil(output.length / cols);
+    const cols = Math.ceil(Math.sqrt(agingImages.length));
+    const rows = Math.ceil(agingImages.length / cols);
 
     canvas2.width = cols * CELL_SIZE + (cols + 1) * PADDING;
     canvas2.height = rows * CELL_SIZE + (rows + 1) * PADDING;
@@ -307,32 +376,106 @@
     ctx.fillStyle = '#1e1e1e';
     ctx.fillRect(0, 0, canvas2.width, canvas2.height);
 
-    images.forEach((img, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const boxX = PADDING + col * (CELL_SIZE + PADDING);
-      const boxY = PADDING + row * (CELL_SIZE + PADDING);
+    agingImages.forEach((img, i) => {
+      const boxX = PADDING + (i % cols) * (CELL_SIZE + PADDING);
+      const boxY = PADDING + Math.floor(i / cols) * (CELL_SIZE + PADDING);
 
       const rect = containRect(img.naturalWidth, img.naturalHeight, boxX, boxY, CELL_SIZE, CELL_SIZE);
       ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
-
-      const resAge = output[i]?.res_age;
-      if (resAge !== undefined) {
-        const label = `${resAge}歳`;
-        ctx.font = '16px sans-serif';
-        const textWidth = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-        ctx.fillRect(boxX, boxY + CELL_SIZE - 22, textWidth + 8, 22);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(label, boxX + 4, boxY + CELL_SIZE - 6);
-      }
+      drawAgeLabel(ctx, i, boxX, boxY + CELL_SIZE);
     });
+  }
 
+  /**
+   * 指定した1枚だけを#canvas2へ描画する。
+   * @param {number} index - agingOutput内のインデックス
+   */
+  function drawSingle(index) {
+    const img = agingImages[index];
+    if (!img) return;
+
+    canvas2.width = img.naturalWidth;
+    canvas2.height = img.naturalHeight;
+
+    const ctx = canvas2.getContext('2d');
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, 0, canvas2.width, canvas2.height);
+    ctx.drawImage(img, 0, 0);
+  }
+
+  /**
+   * スライダー横の年齢表示を更新する。
+   * アップロードした画像の場合は「現在のあなた」を併記する。
+   */
+  function updateAgeLabel(index) {
+    const resAge = agingOutput[index]?.res_age;
+    ageLabel.textContent = resAge === undefined ? '' : `${resAge}歳`;
+
+    if (index === uploadedIndex) {
+      const mark = document.createElement('span');
+      mark.id = 'currentMark';
+      mark.textContent = ' 現在のあなた';
+      ageLabel.appendChild(mark);
+    }
+  }
+
+  /**
+   * 現在の表示モード(グリッド/単一)に合わせて#canvas2とコントロールを更新する。
+   */
+  function renderResults() {
+    if (viewMode === 'grid') {
+      drawGrid();
+      sliderRow.style.display = 'none';
+      viewModeBtn.textContent = '単一表示に切り替え';
+    } else {
+      const index = Number(imageSlider.value);
+      drawSingle(index);
+      updateAgeLabel(index);
+      sliderRow.style.display = 'flex';
+      viewModeBtn.textContent = 'グリッド表示に切り替え';
+    }
+    canvas2.classList.toggle('single', viewMode === 'single');
     canvas2.style.display = 'block';
   }
 
+  /**
+   * aging APIの結果を読み込んで表示状態を初期化する。
+   * @param {{age_idx?: number, output: Array<{url: string, res_age: number}>}} results
+   */
+  async function showAgingResults(results) {
+    const output = results?.output;
+    if (!output || output.length === 0) {
+      throw new Error('描画する結果画像がありません');
+    }
+
+    agingOutput = output;
+    agingImages = await Promise.all(output.map((item) => loadImage(item.url)));
+    uploadedIndex = Number.isInteger(results.age_idx) ? results.age_idx : -1;
+
+    // 単一表示の初期位置はアップロードした画像に合わせる
+    imageSlider.max = String(output.length - 1);
+    imageSlider.value = String(uploadedIndex >= 0 ? uploadedIndex : 0);
+
+    viewMode = 'grid';
+    resultControls.style.display = 'flex';
+    renderResults();
+  }
+
+  viewModeBtn.addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'single' : 'grid';
+    renderResults();
+  });
+
+  imageSlider.addEventListener('input', () => {
+    const index = Number(imageSlider.value);
+    drawSingle(index);
+    updateAgeLabel(index);
+  });
+
   test.addEventListener('click', async () => {
     try {
+      resultControls.style.display = 'none';
+      canvas2.style.display = 'none';
       status.textContent = 'resizing...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
       status.textContent = 'uploading...';
@@ -346,10 +489,10 @@
       const final = await pollTask(taskId);
       console.log('[main] Final response:', final);
 
-      const output = final?.data?.results?.output;
-      if (output && output.length > 0) {
+      const results = final?.data?.results;
+      if (results?.output?.length > 0) {
         status.textContent = '結果画像を読み込み中...';
-        await drawOutputGridToCanvas2(output);
+        await showAgingResults(results);
       }
       status.textContent = 'aging処理が完了しました';
     } catch (e) {
