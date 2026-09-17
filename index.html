@@ -112,11 +112,12 @@
   const AGING_START_URL = BACKEND_ORIGIN + '/api/aging/start';
   const AGING_POLL_URL = BACKEND_ORIGIN + '/api/aging';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  async function startTask(image) {
-    const res = await fetch(AGING_START_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ src_file_url: image }),
+
+  // fileId: POST /files で取得済みのfile_id(aging対象画像はサーバーが
+  // 保持しているため、クライアントからは画像本体を再送する必要はない)
+  async function startTask(fileId) {
+    const res = await fetch(`${AGING_START_URL}/${fileId}`, {
+      method: 'POST'
     });
     if (!res.ok) {
       throw new Error(`Start request failed: ${res.status} ${res.statusText}`);
@@ -254,21 +255,26 @@
     try {
       status.textContent = 'resizing...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      status.textContent = "fetching...";
+      status.textContent = 'uploading...';
       const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
       console.log('[main] Uploaded file_id:', fileId);
-      status.textContent = 'アップロード完了: ' + fileId;
-      // const taskId = await startTask(await getSendableImageUrl());
-      // const final = await pollTask(taskId);
-      // console.log('[main] Final response:', final);
-      // const ctx = canvas2.getContext('2d');
-      // ctx.drawImage(final.output[0].url, 0, 0, canvas.width, canvas.height);
+
+      status.textContent = 'aging処理を開始しています...';
+      const taskId = await startTask(fileId);
+
+      status.textContent = 'aging処理を実行中です...';
+      const final = await pollTask(taskId);
+      console.log('[main] Final response:', final);
+
+      const resultUrl = final?.data?.results?.[0];
+      if (resultUrl) {
+        preview.src = resultUrl;
+        preview.style.display = 'block';
+      }
+      status.textContent = 'aging処理が完了しました';
     } catch (e) {
       console.error('[main] Flow error:', e);
       status.textContent = 'エラー: ' + e.message;
-      setTimeout(() => {
-        alert("Error!");
-      }, 30000);
     }
   });
   startBtn.addEventListener('click', async () => {
@@ -317,7 +323,6 @@
       downloadLink.style.display = 'inline-block';
 
       status.textContent = 'PNG画像をimgタグに描画しました';
-      alert(capturedImageUrl.slice(5,capturedImageUrl.length-1));
     }, 'image/png');
     test.disabled=false;
   });
