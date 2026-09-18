@@ -17,9 +17,16 @@
     font-size: 1.2rem;
     font-weight: 500;
   }
-  video {
+  /* カメラ映像・撮影写真・aging結果は常にこの枠の中に表示する */
+  #stage {
     width: 100%;
     max-width: 640px;
+    margin-top: 1rem;
+    display: flex;
+    justify-content: center;
+  }
+  #stage video {
+    width: 100%;
     border-radius: 8px;
     background: #000;
   }
@@ -40,18 +47,16 @@
   button:hover {
     background: #333;
   }
-  /* 撮影時は非表示のまま描画に使い、aging結果を表示するときだけ見せる */
+  /* 撮影した写真とaging結果の描画先。カメラ映像と入れ替えて表示する */
   #canvas {
-    max-width: 640px;
+    max-width: 100%;
     width: 100%;
     border-radius: 8px;
     display: none;
-    margin-top: 1rem;
   }
   /* 単一表示では縦長の画像でもスライダーが画面外に出ないよう高さを抑える */
   #canvas.single {
     width: auto;
-    max-width: 100%;
     max-height: 60vh;
   }
   #resultControls {
@@ -85,9 +90,13 @@
 <body>
   <h1>Webカメラ映像</h1>
   <p id="status">カメラは停止中です</p>
-  <video id="video" autoplay playsinline></video>
-  <!-- 撮影時のフレーム取り込みと、aging結果の表示の両方に使う -->
-  <canvas id="canvas"></canvas>
+
+  <!-- カメラ映像・撮影した写真・aging結果を、同じ位置で切り替えて表示する -->
+  <div id="stage">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
   <div id="resultControls">
     <button type="button" id="viewModeBtn">単一表示に切り替え</button>
     <div id="sliderRow">
@@ -96,14 +105,11 @@
     </div>
   </div>
   <div>
-    <button id="startBtn">カメラを開始</button>
-    <button id="captureBtn" disabled>PNGとして保存</button>
-    <form>
-      <button type="button" id="test" disabled>test</button>
-    </form>
+    <button type="button" id="startBtn">カメラを開始</button>
+    <button type="button" id="captureBtn" disabled>撮影する</button>
+    <button type="button" id="test" disabled>年齢の変化を見る</button>
   </div>
-  <img id="preview" style="max-width:640px; width:100%; display:none; border-radius:8px; margin-top:1rem;">
-  <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>この画像をダウンロード</a>
+  <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>撮影した写真をダウンロード</a>
 
 <script>
   const video = document.getElementById('video');
@@ -111,7 +117,6 @@
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
   const captureBtn = document.getElementById('captureBtn');
-  const preview = document.getElementById('preview');
   const downloadLink = document.getElementById('downloadLink');
   const test = document.getElementById('test');
   const resultControls = document.getElementById('resultControls');
@@ -133,6 +138,15 @@
   let agingImages = [];
   let uploadedIndex = -1;
   let viewMode = 'grid';
+
+  /**
+   * カメラ映像(video)と、撮影写真・aging結果(canvas)を同じ位置で入れ替える。
+   * @param {'camera'|'canvas'} target - 表示する側
+   */
+  function showInStage(target) {
+    video.style.display = target === 'camera' ? 'block' : 'none';
+    canvas.style.display = target === 'canvas' ? 'block' : 'none';
+  }
 
   /**
    * バックエンド(server.js)のAPIのベースURLを実行時に解決する。
@@ -322,6 +336,25 @@
   }
 
   /**
+   * サーバーに保存されたアップロード画像を削除する。
+   * 来場者の顔写真を必要以上に残さないため、aging処理を終えた時点で呼ぶ。
+   * (この時点でaging API側の画像取得は完了している)
+   * @param {string} fileId
+   */
+  async function deleteUploadedFile(fileId) {
+    try {
+      const res = await fetch(`${BACKEND_BASE}/files/${fileId}`, {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      console.log('[cleanup] Deleted uploaded file:', fileId, res.status);
+    } catch (e) {
+      // 削除に失敗してもサーバー側のTTLで消えるため、処理は続行する
+      console.warn('[cleanup] Failed to delete uploaded file:', fileId, e);
+    }
+  }
+
+  /**
    * 画像URLを読み込む。
    * @param {string} imageUrl
    * @returns {Promise<HTMLImageElement>}
@@ -439,18 +472,18 @@
       viewModeBtn.textContent = 'グリッド表示に切り替え';
     }
     canvas.classList.toggle('single', viewMode === 'single');
-    canvas.style.display = 'block';
+    showInStage('canvas');
   }
 
   /**
-   * aging結果の表示を隠す。#canvasは撮影の作業用と兼用のため、
-   * 結果表示をやめるときはコントロールごと隠す。
+   * aging結果まわりのコントロールを隠す。
+   * #canvasは撮影した写真の表示も兼ねるため、ここでは消さない
+   * (生成処理中も撮影した写真を表示したままにする)。
    */
   function hideResults() {
     resultControls.style.display = 'none';
     sliderRow.style.display = 'none';
     canvas.classList.remove('single');
-    canvas.style.display = 'none';
   }
 
   /**
@@ -488,18 +521,20 @@
   });
 
   test.addEventListener('click', async () => {
+    let fileId = null;
     try {
       hideResults();
-      status.textContent = 'resizing...';
+      status.textContent = '画像を準備しています...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      status.textContent = 'uploading...';
-      const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
+
+      status.textContent = '画像を送信しています...';
+      fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
       console.log('[main] Uploaded file_id:', fileId);
 
-      status.textContent = 'aging処理を開始しています...';
+      status.textContent = '年齢変化の生成を開始しています...';
       const taskId = await startTask(fileId);
 
-      status.textContent = 'aging処理を実行中です...';
+      status.textContent = '生成中です。しばらくお待ちください...';
       const final = await pollTask(taskId);
       console.log('[main] Final response:', final);
 
@@ -508,10 +543,15 @@
         status.textContent = '結果画像を読み込み中...';
         await showAgingResults(results);
       }
-      status.textContent = 'aging処理が完了しました';
+      status.textContent = '生成が完了しました';
     } catch (e) {
       console.error('[main] Flow error:', e);
       status.textContent = 'エラー: ' + e.message;
+    } finally {
+      // 成功・失敗どちらでも、送信した写真はサーバーに残さない
+      if (fileId) {
+        await deleteUploadedFile(fileId);
+      }
     }
   });
   startBtn.addEventListener('click', async () => {
@@ -527,6 +567,7 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true });
       video.srcObject = stream;
+      showLiveCamera();
       status.textContent = 'カメラ映像を表示中';
       startBtn.textContent = 'カメラを停止';
       captureBtn.disabled = false;
@@ -535,10 +576,29 @@
     }
   });
 
+  /**
+   * カメラ映像の表示に戻す(撮り直し)。撮影済みの状態をすべて破棄する。
+   */
+  function showLiveCamera() {
+    hideResults();
+    showInStage('camera');
+    capturedBlob = null;
+    downloadLink.style.display = 'none';
+    captureBtn.textContent = '撮影する';
+    test.disabled = true;
+  }
+
   captureBtn.addEventListener('click', () => {
     if (!stream) return;
 
-    // #canvasは撮影の作業用と結果表示を兼ねるため、前回のaging結果が
+    // 2回目以降は「撮り直す」として機能し、カメラ映像の表示に戻す
+    if (capturedBlob) {
+      showLiveCamera();
+      status.textContent = 'カメラ映像を表示中';
+      return;
+    }
+
+    // #canvasは撮影した写真の表示と結果表示を兼ねるため、前回のaging結果が
     // 表示されたままなら隠してから撮影分を描き込む。
     hideResults();
 
@@ -547,6 +607,9 @@
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    // カメラ映像と同じ位置に、撮影した写真(canvas)を表示する
+    showInStage('canvas');
+
     canvas.toBlob((blob) => {
       capturedBlob = blob;
       // 古いURLが残っていれば解放してからメモリリークを防ぐ
@@ -554,19 +617,16 @@
         URL.revokeObjectURL(capturedImageUrl);
       }
 
-      // PNG画像のURLを変数に保存し、imgタグに描画する
       capturedImageUrl = URL.createObjectURL(blob);
-      preview.src = capturedImageUrl;
-      preview.style.display = 'block';
-
       downloadLink.href = capturedImageUrl;
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       downloadLink.download = `capture-${ts}.png`;
       downloadLink.style.display = 'inline-block';
 
-      status.textContent = 'PNG画像をimgタグに描画しました';
+      status.textContent = '撮影しました。この写真でよければ「年齢の変化を見る」を押してください';
+      captureBtn.textContent = '撮り直す';
+      test.disabled = false;
     }, 'image/png');
-    test.disabled=false;
   });
 </script>
 </body>
