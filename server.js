@@ -40,7 +40,7 @@ const AGING_API_KEY = process.env.AGING_API_KEY;
 // このサーバーの公開URL。設定されていればクライアント申告のoriginより優先する。
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN;
 
-//function: ここからRender公開用のアクセス制限。展示中にURLを知った第三者からAPIキーの利用枠を消費されないよう、Basic認証と推測困難な公開パスで入口を絞る。環境変数が未設定のCodespace開発環境では自動的に無効になるため、開発時の起動方法はこれまでと変わらない
+//NOTE: ここからRender公開用のアクセス制限。展示中にURLを知った第三者からAPIキーの利用枠を消費されないよう、Basic認証と推測困難な公開パスで入口を絞る。環境変数が未設定のCodespace開発環境では自動的に無効になるため、開発時の起動方法はこれまでと変わらない
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
 const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
 
@@ -82,7 +82,7 @@ function requireBasicAuth(req, res, next) {
   res.set('WWW-Authenticate', 'Basic realm="aging", charset="UTF-8"');
   res.status(401).json({ error: '認証が必要です' });
 }
-//function: ここまでRender公開用のアクセス制限
+//NOTE: ここまでRender公開用のアクセス制限
 
 /**
  * aging APIに渡すsrc_file_urlの組み立てに使う公開オリジンを決定する。
@@ -389,7 +389,7 @@ router.get('/api/aging/:taskId', requireBasicAuth, async (req, res) => {
   }
 });
 
-//function: ここからRender公開用の配信設定。フロントエンドとAPIを同一オリジンで配信し、全体をAPP_BASE_PATHの推測困難なパス配下に隠す。Renderのヘルスチェックだけは認証と公開パスの外に置く必要があるため別扱いにしている
+//NOTE: ここからRender公開用の配信設定。フロントエンドとAPIを同一オリジンで配信し、全体をAPP_BASE_PATHの推測困難なパス配下に隠す。Renderのヘルスチェックだけは認証と公開パスの外に置く必要があるため別扱いにしている
 app.get('/healthz', (req, res) => {
   res.type('text/plain').send('ok');
 });
@@ -399,7 +399,7 @@ app.get('/healthz', (req, res) => {
 router.use(requireBasicAuth, express.static(path.join(__dirname, 'public')));
 
 app.use(BASE_PATH || '/', router);
-//function: ここまでRender公開用の配信設定
+//NOTE: ここまでRender公開用の配信設定
 
 // "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず

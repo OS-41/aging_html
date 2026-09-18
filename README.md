@@ -35,7 +35,7 @@ npm run serve:web
 ## 公開(Render)
 
 `npm start` だけでフロントエンドとAPIを同一オリジンで配信する。
-`server.js` 内の `//function:` コメントで囲まれた箇所が公開用の設定。
+`server.js` 内の `//NOTE:` コメントで囲まれた箇所が公開用の設定。
 
 Renderのダッシュボードで設定する環境変数:
 
