@@ -135,18 +135,17 @@
   let viewMode = 'grid';
 
   /**
-   * バックエンド(server.js)のオリジンを実行時に解決する。
-   * GitHub CodespacesはCodespaceごとにランダムなサブドメイン名
-   * (例: vigilant-acorn-xxxx)が割り当てられ、ポート番号だけが
-   * "-3000"/"-5000"のように末尾に付与される。この名前はCodespaceを
-   * 作り直す度（例: iOSのCodespacesアプリから開いた場合）に変わるため、
-   * バックエンドURLをハードコードすると別のCodespaceでは存在しない
-   * ホストへfetchすることになり "TypeError: Load failed" になる。
-   * そのため、現在ページを開いているオリジンから同じCodespace上の
-   * バックエンド(ポート5000)のオリジンを組み立てる。
+   * バックエンド(server.js)のAPIのベースURLを実行時に解決する。
+   *
+   * 1) Codespaceでの開発時: フロントは3000、バックエンドは5000と別オリジン。
+   *    Codespaceごとにサブドメイン名が変わるためURLはハードコードできず、
+   *    現在のホスト名のポート部分だけを5000に差し替えて組み立てる。
+   * 2) Render公開時: フロントとAPIを同一オリジンで配信し、さらに全体を
+   *    推測困難なパス(APP_BASE_PATH)配下に置くため、このページ自身の
+   *    ディレクトリをそのままAPIのベースURLとして使う。
    */
-  function resolveBackendOrigin() {
-    const { protocol, hostname, port, origin } = window.location;
+  function resolveBackendBase() {
+    const { protocol, hostname, port, origin, pathname } = window.location;
 
     // 例: vigilant-acorn-xxxx-3000.app.github.dev -> vigilant-acorn-xxxx-5000.app.github.dev
     const codespacesMatch = hostname.match(/^(.*)-\d+(\.app\.github\.dev|\.githubpreview\.dev|\.preview\.app\.github\.dev)$/);
@@ -159,18 +158,21 @@
       return `${protocol}//${hostname}:5000`;
     }
 
-    return origin;
+    // 同一オリジン配信: このページが置かれているディレクトリがAPIのベース
+    return origin + pathname.replace(/\/[^/]*$/, '');
   }
 
-  const BACKEND_ORIGIN = resolveBackendOrigin();
-  const UPLOAD_URL = BACKEND_ORIGIN + '/files';
-  console.log('[config] BACKEND_ORIGIN =', BACKEND_ORIGIN);
+  const BACKEND_BASE = resolveBackendBase();
+  // サーバーへ申告するのはオリジンのみ(公開パスはサーバー側が自分で付ける)
+  const BACKEND_ORIGIN = new URL(BACKEND_BASE, window.location.href).origin;
+  const UPLOAD_URL = BACKEND_BASE + '/files';
+  console.log('[config] BACKEND_BASE =', BACKEND_BASE);
 
   // aging APIのAPIキーはブラウザに一切渡さない。
   // server.js の /api/aging/* エンドポイントがサーバー側の.envに置いた
   // キーを使ってyce-api-01.makeupar.comへプロキシする。
-  const AGING_START_URL = BACKEND_ORIGIN + '/api/aging/start';
-  const AGING_POLL_URL = BACKEND_ORIGIN + '/api/aging';
+  const AGING_START_URL = BACKEND_BASE + '/api/aging/start';
+  const AGING_POLL_URL = BACKEND_BASE + '/api/aging';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // fileId: POST /files で取得済みのfile_id(aging対象画像はサーバーが
@@ -293,10 +295,12 @@
 
     let res;
     try {
+      // credentialsは'same-origin'(既定)にしておく。'omit'にすると
+      // 同一オリジン配信時にBasic認証の資格情報まで送られなくなり401になる。
       res = await fetch(uploadUrl, {
         method: 'POST',
         mode: 'cors',
-        credentials: 'omit',
+        credentials: 'same-origin',
         body: formData
       });
     } catch (networkErr) {

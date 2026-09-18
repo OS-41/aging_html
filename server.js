@@ -26,7 +26,7 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const { randomUUID } = require('crypto');
+const { randomUUID, timingSafeEqual } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -39,6 +39,50 @@ const AGING_API_KEY = process.env.AGING_API_KEY;
 
 // このサーバーの公開URL。設定されていればクライアント申告のoriginより優先する。
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN;
+
+//function: ここからRender公開用のアクセス制限。展示中にURLを知った第三者からAPIキーの利用枠を消費されないよう、Basic認証と推測困難な公開パスで入口を絞る。環境変数が未設定のCodespace開発環境では自動的に無効になるため、開発時の起動方法はこれまでと変わらない
+const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
+const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
+
+// 公開パス。例: APP_BASE_PATH=/k7f3m2q8 とするとアプリ全体が
+// https://<host>/k7f3m2q8/ 配下でのみ動く。未設定ならルート直下。
+const BASE_PATH = (process.env.APP_BASE_PATH || '').replace(/\/+$/, '');
+
+/**
+ * 文字列を長さの差も含めて一定時間で比較する(総当たり時の情報漏れを防ぐ)。
+ */
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Basic認証を要求するミドルウェア。
+ * 展示用PCでは設営時に一度入力すればブラウザが保持するため、
+ * 来場者の操作を妨げずに第三者のアクセスだけを遮断できる。
+ * BASIC_AUTH_USER / BASIC_AUTH_PASSWORD が未設定の場合は素通しする。
+ */
+function requireBasicAuth(req, res, next) {
+  if (!BASIC_AUTH_USER || !BASIC_AUTH_PASSWORD) {
+    return next();
+  }
+
+  const [scheme, encoded] = (req.get('authorization') || '').split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const decoded = Buffer.from(encoded, 'base64').toString();
+    const separator = decoded.indexOf(':');
+    const user = decoded.slice(0, separator);
+    const password = decoded.slice(separator + 1);
+    if (safeEqual(user, BASIC_AUTH_USER) && safeEqual(password, BASIC_AUTH_PASSWORD)) {
+      return next();
+    }
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="aging", charset="UTF-8"');
+  res.status(401).json({ error: '認証が必要です' });
+}
+//function: ここまでRender公開用のアクセス制限
 
 /**
  * aging APIに渡すsrc_file_urlの組み立てに使う公開オリジンを決定する。
@@ -72,6 +116,9 @@ function resolvePublicOrigin(candidate) {
   const isLocal = ['localhost', '127.0.0.1'].includes(url.hostname);
   return isCodespaces || isLocal ? url.origin : null;
 }
+
+// ルート定義はrouterにまとめ、公開パス(BASE_PATH)配下へまとめてマウントする
+const router = express.Router();
 
 app.use(express.json());
 
@@ -180,11 +227,7 @@ function isJpegFile(filePath) {
  * multipart/form-dataでフィールド名 "file" として画像を送信する
  * レスポンス例: { "file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
  */
-app.get('/',(req,res) => {
-  console.log("test");
-  res.send({msg:'Test!'});
-})
-app.post('/files', (req, res) => {
+router.post('/files', requireBasicAuth, (req, res) => {
   console.log("posted.");
   upload.single('file')(req, res, (err) => {
     console.log("upload");
@@ -226,7 +269,7 @@ app.post('/files', (req, res) => {
  * GET /files/:file_id
  * file_idに対応する画像バイナリを返す
  */
-app.get('/files/:file_id', (req, res) => {
+router.get('/files/:file_id', (req, res) => {
   const fileInfo = fileStore.get(req.params.file_id);
 
   if (!fileInfo) {
@@ -247,7 +290,7 @@ app.get('/files/:file_id', (req, res) => {
  * DELETE /files/:file_id
  * file_idに対応する画像を削除する
  */
-app.delete('/files/:file_id', (req, res) => {
+router.delete('/files/:file_id', requireBasicAuth, (req, res) => {
   const fileInfo = fileStore.get(req.params.file_id);
 
   if (!fileInfo) {
@@ -280,7 +323,7 @@ app.delete('/files/:file_id', (req, res) => {
  * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
  * body: { "origin": "https://xxxx-5000.app.github.dev" }
  */
-app.post('/api/aging/start/:file_id', async (req, res) => {
+router.post('/api/aging/start/:file_id', requireBasicAuth, async (req, res) => {
   if (!AGING_API_KEY) {
     console.log("AGING_API_KEY is not available. process discontinued");
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
@@ -298,7 +341,7 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
     return res.status(400).json({ error: '許可されていないoriginです(Codespacesの転送URLを指定してください)' });
   }
 
-  const srcFileUrl = `${origin}/files/${req.params.file_id}`;
+  const srcFileUrl = `${origin}${BASE_PATH}/files/${req.params.file_id}`;
 
   try {
     const apiRes = await fetch(AGING_API_BASE_URL, {
@@ -326,7 +369,7 @@ app.post('/api/aging/start/:file_id', async (req, res) => {
  * GET /api/aging/:taskId
  * aging APIのタスク状況をポーリングするプロキシ。
  */
-app.get('/api/aging/:taskId', async (req, res) => {
+router.get('/api/aging/:taskId', requireBasicAuth, async (req, res) => {
   if (!AGING_API_KEY) {
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
@@ -346,9 +389,21 @@ app.get('/api/aging/:taskId', async (req, res) => {
   }
 });
 
+//function: ここからRender公開用の配信設定。フロントエンドとAPIを同一オリジンで配信し、全体をAPP_BASE_PATHの推測困難なパス配下に隠す。Renderのヘルスチェックだけは認証と公開パスの外に置く必要があるため別扱いにしている
+app.get('/healthz', (req, res) => {
+  res.type('text/plain').send('ok');
+});
+
+// フロントエンドの静的配信。Basic認証の対象にする。
+// (Codespaceでは従来通り `npm run serve:web` で別ポートから配信してもよい)
+router.use(requireBasicAuth, express.static(path.join(__dirname, 'public')));
+
+app.use(BASE_PATH || '/', router);
+//function: ここまでRender公開用の配信設定
+
 // "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
 // Bad Gatewayになるケースを避ける。
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`サーバーが起動しました: http://localhost:${PORT}`);
+  console.log(`サーバーが起動しました: http://localhost:${PORT}${BASE_PATH || ''}/`);
 });
