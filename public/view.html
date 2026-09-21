@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>閲覧ブース</title>
+<link rel="stylesheet" href="booth.css">
+<style>
+  .seq {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+  }
+
+  /* 単一表示のスライダーと年齢表示 */
+  .slider-row {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .slider-row input[type="range"] {
+    flex: 1;
+    min-width: 0;
+    height: 40px;
+    accent-color: var(--accent);
+  }
+  .age-label {
+    white-space: nowrap;
+    font-size: clamp(18px, 2.4vw, 22px);
+    font-weight: 600;
+  }
+  .age-mark {
+    display: block;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+  }
+
+  /* 順序が入れ替わったときに係員が選び直すための一覧 */
+  .picker {
+    width: 100%;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .picker h2 {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  .picker-list {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+  .picker-item {
+    flex: 0 0 auto;
+    min-width: 96px;
+    min-height: 88px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 2px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 15px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .picker-item .num {
+    display: block;
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .picker-item .state { font-size: 12px; color: var(--muted); }
+  .picker-item.is-current { border-color: var(--accent); }
+  .picker-item.is-viewed { opacity: 0.5; }
+  .picker-empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="booth">
+    <div class="booth-header">
+      <h1>未来のあなた</h1>
+      <p class="subtitle" id="subtitle">お呼びした番号の方からご覧いただけます</p>
+    </div>
+
+    <p class="status" id="status">次の方を読み込んでいます...</p>
+
+    <div class="stage" id="stage">
+      <canvas id="canvas" hidden></canvas>
+      <div class="spinner" id="spinner" hidden></div>
+    </div>
+
+    <div class="slider-row" id="sliderRow" hidden>
+      <input type="range" id="imageSlider" min="0" max="0" step="1" value="0">
+      <span class="age-label" id="ageLabel"></span>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="viewModeBtn" hidden>すべて並べて見る</button>
+      <button type="button" id="nextBtn" class="primary">次の方へ</button>
+    </div>
+
+    <div class="picker">
+      <h2>番号を選んで表示（順番が前後した場合）</h2>
+      <div class="picker-list" id="pickerList"><span class="picker-empty">受付がありません</span></div>
+    </div>
+
+    <div class="staff-bar">
+      <span>閲覧ブース</span>
+      <span>お待ち <span class="count" id="waitingCount">0</span> 件</span>
+      <span>生成中 <span class="count" id="processingCount">0</span> 件</span>
+      <button type="button" class="quiet" id="reloadBtn">一覧を更新</button>
+    </div>
+  </div>
+
+<script src="common.js"></script>
+<script>
+  const canvas = document.getElementById('canvas');
+  const spinner = document.getElementById('spinner');
+  const statusEl = document.getElementById('status');
+  const subtitle = document.getElementById('subtitle');
+  const sliderRow = document.getElementById('sliderRow');
+  const imageSlider = document.getElementById('imageSlider');
+  const ageLabel = document.getElementById('ageLabel');
+  const viewModeBtn = document.getElementById('viewModeBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const pickerList = document.getElementById('pickerList');
+  const waitingCount = document.getElementById('waitingCount');
+  const processingCount = document.getElementById('processingCount');
+  const reloadBtn = document.getElementById('reloadBtn');
+
+  // 一覧と待ち件数を定期的に更新する間隔
+  const REFRESH_MS = 5000;
+
+  let currentEntry = null;
+  let images = [];
+  let uploadedIndex = -1;
+  let viewMode = 'single';
+
+  function setStatus(text, kind = '') {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (kind ? ` is-${kind}` : '');
+  }
+
+  function containRect(imgW, imgH, boxX, boxY, boxW, boxH) {
+    const scale = Math.min(boxW / imgW, boxH / imgH);
+    const w = imgW * scale;
+    const h = imgH * scale;
+    return { x: boxX + (boxW - w) / 2, y: boxY + (boxH - h) / 2, w, h };
+  }
+
+  function ageTextFor(index) {
+    const output = currentEntry?.outputs[index];
+    if (!output || output.res_age === undefined) return '';
+    return `${output.res_age}歳`;
+  }
+
+  function drawGrid() {
+    const CELL = 320;
+    const PAD = 12;
+    const cols = Math.ceil(Math.sqrt(images.length));
+    const rows = Math.ceil(images.length / cols);
+
+    canvas.width = cols * CELL + (cols + 1) * PAD;
+    canvas.height = rows * CELL + (rows + 1) * PAD;
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#15181c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    images.forEach((img, i) => {
+      const boxX = PAD + (i % cols) * (CELL + PAD);
+      const boxY = PAD + Math.floor(i / cols) * (CELL + PAD);
+      const rect = containRect(img.naturalWidth, img.naturalHeight, boxX, boxY, CELL, CELL);
+      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
+
+      const label = i === uploadedIndex ? `${ageTextFor(i)} いまのあなた` : ageTextFor(i);
+      if (!label) return;
+      ctx.font = 'bold 30px "Hiragino Sans", sans-serif';
+      const textWidth = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(boxX, boxY + CELL - 46, textWidth + 20, 46);
+      ctx.fillStyle = i === uploadedIndex ? '#4ba3e3' : '#fff';
+      ctx.fillText(label, boxX + 10, boxY + CELL - 13);
+    });
+  }
+
+  function drawSingle(index) {
+    const img = images[index];
+    if (!img) return;
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#15181c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+  }
+
+  function updateAgeLabel(index) {
+    ageLabel.textContent = ageTextFor(index);
+    if (index === uploadedIndex) {
+      const mark = document.createElement('span');
+      mark.className = 'age-mark';
+      mark.textContent = 'いまのあなた';
+      ageLabel.appendChild(mark);
+    }
+  }
+
+  function render() {
+    if (viewMode === 'grid') {
+      drawGrid();
+      sliderRow.hidden = true;
+      viewModeBtn.textContent = '1枚ずつ見る';
+    } else {
+      const index = Number(imageSlider.value);
+      drawSingle(index);
+      updateAgeLabel(index);
+      sliderRow.hidden = false;
+      viewModeBtn.textContent = 'すべて並べて見る';
+    }
+    canvas.hidden = false;
+    viewModeBtn.hidden = false;
+  }
+
+  function clearDisplay() {
+    canvas.hidden = true;
+    sliderRow.hidden = true;
+    viewModeBtn.hidden = true;
+    images = [];
+    currentEntry = null;
+  }
+
+  /**
+   * 受付1件を表示する。結果画像はこのサーバーに取り込み済みのものを読む。
+   */
+  async function showEntry(entry) {
+    currentEntry = entry;
+    uploadedIndex = Number.isInteger(entry.age_idx) ? entry.age_idx : -1;
+    subtitle.textContent = `番号 ${entry.sequence} の方`;
+
+    clearDisplay();
+    currentEntry = entry;
+    spinner.hidden = false;
+    setStatus('写真を読み込んでいます...');
+
+    try {
+      images = await Promise.all(entry.outputs.map((output) => loadImage(resolveImageUrl(output.url))));
+    } catch (err) {
+      spinner.hidden = true;
+      setStatus('写真を読み込めませんでした。係員をお呼びください', 'error');
+      console.error('[view] load failed:', err);
+      return;
+    }
+
+    spinner.hidden = true;
+    imageSlider.max = String(images.length - 1);
+    imageSlider.value = String(uploadedIndex >= 0 ? uploadedIndex : 0);
+    viewMode = 'single';
+    render();
+    setStatus('スライダーを動かすと年齢が変わります');
+
+    // 表示した時点で待ち行列から外す
+    callApi(`/api/entries/${entry.id}/viewed`, { method: 'POST' }).catch(() => {});
+  }
+
+  /**
+   * 次の方（未閲覧で最も古い受付）を表示する。
+   */
+  async function showNext() {
+    nextBtn.disabled = true;
+    clearDisplay();
+    spinner.hidden = false;
+    setStatus('次の方を読み込んでいます...');
+
+    try {
+      const entry = await callApi('/api/entries/next');
+      await showEntry(entry);
+    } catch (err) {
+      spinner.hidden = true;
+      if (err.status === 404) {
+        const processing = err.payload?.processing || 0;
+        subtitle.textContent = 'お呼びした番号の方からご覧いただけます';
+        setStatus(processing > 0
+          ? `ただいま ${processing} 件を準備中です。少々お待ちください`
+          : 'お待ちの方はいません');
+      } else {
+        setStatus('サーバーに接続できません。係員をお呼びください', 'error');
+        console.error('[view] next failed:', err);
+      }
+    } finally {
+      nextBtn.disabled = false;
+    }
+  }
+
+  /**
+   * 一覧と待ち件数を更新する。順番が前後したときはここから選び直す。
+   */
+  async function refreshList() {
+    let data;
+    try {
+      data = await callApi('/api/entries');
+    } catch (err) {
+      return;
+    }
+
+    waitingCount.textContent = String(data.waiting);
+    processingCount.textContent = String(data.processing);
+
+    pickerList.replaceChildren();
+    const recent = data.entries.slice(-12).reverse();
+    if (recent.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'picker-empty';
+      empty.textContent = '受付がありません';
+      pickerList.append(empty);
+      return;
+    }
+
+    for (const entry of recent) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'picker-item';
+      if (entry.id === currentEntry?.id) button.classList.add('is-current');
+      if (entry.viewed_at) button.classList.add('is-viewed');
+      button.disabled = entry.status !== 'ready';
+
+      const num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = String(entry.sequence);
+
+      const state = document.createElement('span');
+      state.className = 'state';
+      state.textContent = entry.status === 'ready'
+        ? (entry.viewed_at ? '表示済み' : 'お待ち')
+        : (entry.status === 'processing' ? '準備中' : '失敗');
+
+      button.append(num, state);
+      button.addEventListener('click', () => showEntry(entry));
+      pickerList.append(button);
+    }
+  }
+
+  viewModeBtn.addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'single' : 'grid';
+    render();
+  });
+
+  imageSlider.addEventListener('input', () => {
+    const index = Number(imageSlider.value);
+    drawSingle(index);
+    updateAgeLabel(index);
+  });
+
+  nextBtn.addEventListener('click', showNext);
+  reloadBtn.addEventListener('click', refreshList);
+
+  refreshList();
+  setInterval(refreshList, REFRESH_MS);
+  showNext();
+</script>
+</body>
+</html>
