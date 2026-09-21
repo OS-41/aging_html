@@ -15,16 +15,20 @@
  * 画面:
  *   /               1台で完結する単体版(開発・動作確認用)
  *   /capture.html   撮影ブース用
- *   /view.html      閲覧ブース用
+ *   /view.html      閲覧ブース用(職員が入れ替えるまで同じ内容を映し続ける)
+ *   /staff.html     係員用(表示の操作・保管一覧・処理履歴)
  *
  * エンドポイント(2ブース構成):
  *   POST   /api/entries                       写真を受け取り受付番号を返す。aging処理は裏で進む
  *   GET    /api/entries                       受付一覧(撮影時刻の古い順)
- *   GET    /api/entries/next                  未閲覧かつ生成済みで最も古いもの＝次の人
  *   GET    /api/entries/:id                   受付1件の詳細
- *   POST   /api/entries/:id/viewed            閲覧済みにする
  *   DELETE /api/entries/:id                   受付を取り消す(係員用)
  *   GET    /api/entries/:id/images/:index     取り込み済みの結果画像
+ *   GET    /api/display                       閲覧ブースに映している内容
+ *   POST   /api/display/advance               次のDISPLAY_SLOT_COUNT人分に入れ替える(係員用)
+ *   POST   /api/display/clear                 表示を消す(係員用)
+ *   GET    /api/logs                          処理履歴(サーバー・クライアント双方)
+ *   POST   /api/logs                          クライアントからの履歴を記録する
  *
  * エンドポイント(単体版):
  *   POST /files   画像をアップロードし、file_idを返す
@@ -220,6 +224,41 @@ const MAX_ENTRIES = 300;
 const ENTRY_TTL_MS = 60 * 60 * 1000; // 60分
 const RESULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 
+// 閲覧ブースの画面は職員が任意のタイミングでまとめて入れ替える。
+// 一度に何人分を並べるかはここで決める。
+const DISPLAY_SLOT_COUNT = 4;
+
+// 現在、閲覧ブースに映している受付ID
+let displayBatch = [];
+let displayUpdatedAtMs = null;
+
+// ---- 処理履歴 ----
+// 係員が会場でトラブルを追えるよう、サーバーの処理とクライアント(各ブースの
+// ブラウザ)の通信結果を同じ時系列に残す。ステータスコードとエラーメッセージも含める。
+const MAX_LOG_ENTRIES = 500;
+const logStore = [];
+let logSequence = 0;
+
+/**
+ * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
+ */
+function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null }) {
+  logSequence += 1;
+  logStore.push({
+    id: logSequence,
+    at: new Date().toISOString(),
+    source,
+    level,
+    event,
+    message: String(message).slice(0, 500),
+    status,
+    sequence
+  });
+  if (logStore.length > MAX_LOG_ENTRIES) {
+    logStore.splice(0, logStore.length - MAX_LOG_ENTRIES);
+  }
+}
+
 function deleteEntry(entryId) {
   const entry = entryStore.get(entryId);
   if (!entry) return;
@@ -254,15 +293,37 @@ function entriesInOrder() {
 }
 
 /**
+ * 閲覧ブースに映している内容。期限切れで消えた受付は除いて返す。
+ */
+function currentDisplay() {
+  const entries = displayBatch
+    .map((entryId) => entryStore.get(entryId))
+    .filter(Boolean)
+    .map(toPublicEntry);
+
+  return {
+    slot_count: DISPLAY_SLOT_COUNT,
+    updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
+    entries
+  };
+}
+
+/**
  * 閲覧ブースに渡す形へ整形する。結果画像はこのサーバーのURLで返すため、
  * aging API側のURLが失効していても表示できる。
  */
 function toPublicEntry(entry) {
+  // 係員向け一覧では写真そのものは映さず、ファイル名と撮影時刻だけを見せる
+  const files = entry.outputs.length > 0
+    ? entry.outputs.map((output) => path.basename(output.filePath))
+    : (entry.sourceFileId ? [`${entry.sourceFileId}.jpg`] : []);
+
   return {
     id: entry.id,
     sequence: entry.sequence,
     status: entry.status,
     error: entry.error,
+    files,
     captured_at: new Date(entry.capturedAtMs).toISOString(),
     viewed_at: entry.viewedAtMs ? new Date(entry.viewedAtMs).toISOString() : null,
     age: entry.age,
@@ -328,7 +389,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * aging APIにタスクを開始させ、task_idを返す。
  * @param {string} srcFileUrl - 外部から取得できる元画像のURL
  */
-async function startAgingTask(srcFileUrl) {
+async function startAgingTask(srcFileUrl, sequence) {
   const res = await fetch(AGING_API_BASE_URL, {
     method: 'POST',
     headers: {
@@ -340,8 +401,16 @@ async function startAgingTask(srcFileUrl) {
 
   const payload = await res.json().catch(() => ({}));
   const taskId = payload?.data?.task_id;
+  addLog({
+    level: taskId ? 'info' : 'error',
+    event: 'aging:start',
+    status: res.status,
+    sequence,
+    message: taskId ? `task_id=${taskId}` : JSON.stringify(payload).slice(0, 200)
+  });
+
   if (!taskId) {
-    throw new Error(`タスクを開始できませんでした (${res.status}): ${JSON.stringify(payload)}`);
+    throw new Error(`タスクを開始できませんでした (${res.status})`);
   }
   return taskId;
 }
@@ -349,7 +418,7 @@ async function startAgingTask(srcFileUrl) {
 /**
  * タスクの完了を待ち、results を返す。
  */
-async function pollAgingTask(taskId, { intervalMs = 3000, maxAttempts = 100 } = {}) {
+async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts = 100 } = {}) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(`${AGING_API_BASE_URL}/${taskId}`, {
       method: 'GET',
@@ -359,10 +428,16 @@ async function pollAgingTask(taskId, { intervalMs = 3000, maxAttempts = 100 } = 
     const taskStatus = payload?.data?.task_status;
 
     if (taskStatus === 'success') {
+      addLog({ event: 'aging:success', status: res.status, sequence, message: `${attempt}回目のポーリングで完了` });
       return payload.data.results;
     }
     if (taskStatus === 'error') {
-      throw new Error(payload?.data?.error_message || payload?.data?.error || '生成に失敗しました');
+      const detail = payload?.data?.error_message || payload?.data?.error || '生成に失敗しました';
+      addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
+      throw new Error(detail);
+    }
+    if (!res.ok) {
+      addLog({ level: 'warn', event: 'aging:poll', status: res.status, sequence, message: `想定外の応答 (${attempt}回目)` });
     }
 
     await sleep(intervalMs);
@@ -376,9 +451,10 @@ async function pollAgingTask(taskId, { intervalMs = 3000, maxAttempts = 100 } = 
  * 完成した時点で必ずコピーを持つ。
  * @returns {Promise<{resAge: number, filePath: string}>}
  */
-async function downloadResultImage(entryId, index, output) {
+async function downloadResultImage(entryId, index, output, sequence) {
   const res = await fetch(output.url);
   if (!res.ok) {
+    addLog({ level: 'error', event: 'result:download', status: res.status, sequence, message: `${index}枚目の取得に失敗` });
     throw new Error(`結果画像を取得できませんでした (${res.status})`);
   }
 
@@ -400,13 +476,14 @@ async function downloadResultImage(entryId, index, output) {
 async function processEntry(entry, origin) {
   try {
     const srcFileUrl = `${origin}${BASE_PATH}/files/${entry.sourceFileId}`;
-    entry.taskId = await startAgingTask(srcFileUrl);
+    entry.taskId = await startAgingTask(srcFileUrl, entry.sequence);
 
-    const results = await pollAgingTask(entry.taskId);
+    const results = await pollAgingTask(entry.taskId, entry.sequence);
 
     // 元画像はaging APIが取得し終えているので、ここで削除してよい
     deleteStoredFile(entry.sourceFileId);
     entry.sourceFileId = null;
+    addLog({ event: 'source:deleted', sequence: entry.sequence, message: '元画像を削除' });
 
     const outputs = results?.output || [];
     if (outputs.length === 0) {
@@ -414,13 +491,14 @@ async function processEntry(entry, origin) {
     }
 
     entry.outputs = await Promise.all(
-      outputs.map((output, index) => downloadResultImage(entry.id, index, output))
+      outputs.map((output, index) => downloadResultImage(entry.id, index, output, entry.sequence))
     );
     entry.age = results.age ?? null;
     entry.ageIdx = Number.isInteger(results.age_idx) ? results.age_idx : null;
     entry.ageMin = results.age_min ?? null;
     entry.ageMax = results.age_max ?? null;
     entry.status = 'ready';
+    addLog({ event: 'entry:ready', sequence: entry.sequence, message: `結果画像 ${entry.outputs.length}枚を保存` });
     console.log(`[entry ${entry.sequence}] 生成完了 (${entry.outputs.length}枚)`);
   } catch (err) {
     entry.status = 'error';
@@ -429,6 +507,7 @@ async function processEntry(entry, origin) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
     }
+    addLog({ level: 'error', event: 'entry:error', sequence: entry.sequence, message: err.message });
     console.log(`[entry ${entry.sequence}] 生成失敗: ${err.message}`);
   }
 }
@@ -494,6 +573,8 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
     };
     entryStore.set(entry.id, entry);
 
+    addLog({ event: 'entry:created', status: 201, sequence: entry.sequence, message: `${req.file.size}バイトを受信` });
+
     // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める
     processEntry(entry, origin);
 
@@ -519,17 +600,81 @@ router.get('/api/entries', requireBasicAuth, (req, res) => {
 });
 
 /**
- * GET /api/entries/next
- * まだ見ていない中で最も古い、生成済みの受付を返す。
- * 来場者は撮影した順に到着するため、これが「次の人」になる。
+ * GET /api/display
+ * 閲覧ブースに映している内容。職員が入れ替えるまで変わらない。
  */
-router.get('/api/entries/next', requireBasicAuth, (req, res) => {
-  const next = entriesInOrder().find((entry) => entry.status === 'ready' && !entry.viewedAtMs);
-  if (!next) {
-    const processing = entriesInOrder().filter((entry) => entry.status === 'processing').length;
-    return res.status(404).json({ error: '表示できる受付がありません', processing });
+router.get('/api/display', requireBasicAuth, (req, res) => {
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/display/advance
+ * 未表示のうち古い順に DISPLAY_SLOT_COUNT 人分を画面に載せ替える。
+ * 職員が頃合いを見てまとめて更新するための操作。
+ */
+router.post('/api/display/advance', requireBasicAuth, (req, res) => {
+  const next = entriesInOrder()
+    .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
+    .slice(0, DISPLAY_SLOT_COUNT);
+
+  if (next.length === 0) {
+    addLog({ level: 'warn', event: 'display:advance', message: '表示できる受付がありませんでした' });
+    return res.status(409).json({ error: '表示できる受付がありません', ...currentDisplay() });
   }
-  res.json(toPublicEntry(next));
+
+  const now = Date.now();
+  for (const entry of next) {
+    entry.viewedAtMs = now;
+  }
+  displayBatch = next.map((entry) => entry.id);
+  displayUpdatedAtMs = now;
+
+  addLog({
+    event: 'display:advance',
+    message: `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示`
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/display/clear
+ * 閲覧ブースの画面を空にする。
+ */
+router.post('/api/display/clear', requireBasicAuth, (req, res) => {
+  displayBatch = [];
+  displayUpdatedAtMs = Date.now();
+  addLog({ event: 'display:clear', message: '表示を消去' });
+  res.json(currentDisplay());
+});
+
+/**
+ * GET /api/logs
+ * 処理履歴(サーバー・クライアント双方)を新しい順に返す。
+ */
+router.get('/api/logs', requireBasicAuth, (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, MAX_LOG_ENTRIES);
+  res.json({ logs: [...logStore].reverse().slice(0, limit) });
+});
+
+/**
+ * POST /api/logs
+ * 各ブースのブラウザから通信結果を送ってもらい、同じ時系列に残す。
+ */
+router.post('/api/logs', requireBasicAuth, (req, res) => {
+  const { level, event, message, status, sequence } = req.body || {};
+  if (!event) {
+    return res.status(400).json({ error: 'eventが指定されていません' });
+  }
+
+  addLog({
+    source: 'client',
+    level: ['info', 'warn', 'error'].includes(level) ? level : 'info',
+    event: String(event).slice(0, 80),
+    message,
+    status: Number.isInteger(status) ? status : null,
+    sequence: Number.isInteger(sequence) ? sequence : null
+  });
+  res.status(204).send();
 });
 
 /**
@@ -544,26 +689,15 @@ router.get('/api/entries/:entry_id', requireBasicAuth, (req, res) => {
 });
 
 /**
- * POST /api/entries/:entry_id/viewed
- * 閲覧済みにして待ち行列から外す。
- */
-router.post('/api/entries/:entry_id/viewed', requireBasicAuth, (req, res) => {
-  const entry = entryStore.get(req.params.entry_id);
-  if (!entry) {
-    return res.status(404).json({ error: '指定された受付は存在しません' });
-  }
-  entry.viewedAtMs = Date.now();
-  res.status(204).send();
-});
-
-/**
  * DELETE /api/entries/:entry_id
  * 係員が個別に取り消す用。結果画像もまとめて削除する。
  */
 router.delete('/api/entries/:entry_id', requireBasicAuth, (req, res) => {
-  if (!entryStore.has(req.params.entry_id)) {
+  const entry = entryStore.get(req.params.entry_id);
+  if (!entry) {
     return res.status(404).json({ error: '指定された受付は存在しません' });
   }
+  addLog({ level: 'warn', event: 'entry:deleted', sequence: entry.sequence, message: '係員が取り消し' });
   deleteEntry(req.params.entry_id);
   res.status(204).send();
 });

@@ -109,7 +109,6 @@
     <button type="button" id="captureBtn" disabled>撮影する</button>
     <button type="button" id="test" disabled>年齢の変化を見る</button>
   </div>
-  <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>撮影した写真をダウンロード</a>
 
 <script>
   const video = document.getElementById('video');
@@ -117,7 +116,6 @@
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
   const captureBtn = document.getElementById('captureBtn');
-  const downloadLink = document.getElementById('downloadLink');
   const test = document.getElementById('test');
   const resultControls = document.getElementById('resultControls');
   const viewModeBtn = document.getElementById('viewModeBtn');
@@ -583,7 +581,6 @@
     hideResults();
     showInStage('camera');
     capturedBlob = null;
-    downloadLink.style.display = 'none';
     captureBtn.textContent = '撮影する';
     test.disabled = true;
   }
@@ -618,10 +615,6 @@
       }
 
       capturedImageUrl = URL.createObjectURL(blob);
-      downloadLink.href = capturedImageUrl;
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      downloadLink.download = `capture-${ts}.png`;
-      downloadLink.style.display = 'inline-block';
 
       status.textContent = '撮影しました。この写真でよければ「年齢の変化を見る」を押してください';
       captureBtn.textContent = '撮り直す';

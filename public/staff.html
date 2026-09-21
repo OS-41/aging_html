@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>係員用 運用画面</title>
+<link rel="stylesheet" href="booth.css">
+<style>
+  /* 係員は座って手元で操作するため、ブース画面より情報密度を上げる */
+  body {
+    font-size: 15px;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .booth {
+    max-width: 1200px;
+    gap: 16px;
+    align-items: stretch;
+  }
+
+  /* 新しい写真が届いたことを知らせる通知 */
+  .notice {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 12px;
+    padding: 14px 20px;
+    font-size: 18px;
+    font-weight: 700;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  }
+  .notice button {
+    min-height: 40px;
+    min-width: 0;
+    padding: 6px 16px;
+    font-size: 15px;
+    background: rgba(0, 0, 0, 0.18);
+    border-color: transparent;
+    color: var(--accent-ink);
+  }
+
+  .panel {
+    background: var(--surface);
+    border-radius: 14px;
+    padding: 18px 20px;
+  }
+  .panel h2 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 0 0 4px;
+  }
+  .panel .hint {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 0 0 14px;
+  }
+
+  .control-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+  .stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+    margin-bottom: 14px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .stats b {
+    color: var(--ink);
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+  .now-showing {
+    margin: 14px 0 0;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .now-showing b { color: var(--ink); font-size: 18px; }
+
+  .table-scroll { overflow-x: auto; max-height: 320px; overflow-y: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td {
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  td.files {
+    white-space: normal;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    color: var(--muted);
+    word-break: break-all;
+    min-width: 260px;
+  }
+  td.msg { white-space: normal; min-width: 240px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .tag-processing { background: #3a3117; color: #e6ad4b; }
+  .tag-ready { background: #17342a; color: var(--ok); }
+  .tag-error { background: #3b201d; color: var(--danger); }
+  .tag-viewed { background: #2a313a; color: var(--muted); }
+  .tag-server { background: #1b2b3a; color: #7cc0f0; }
+  .tag-client { background: #2f2440; color: #c49bf0; }
+
+  .level-error { color: var(--danger); }
+  .level-warn { color: #e6ad4b; }
+
+  .row-del {
+    min-height: 30px;
+    min-width: 0;
+    padding: 2px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--danger);
+    background: transparent;
+    border-color: var(--line);
+  }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 2px; }
+</style>
+</head>
+<body>
+  <div class="booth">
+    <div class="notice" id="notice" hidden>
+      <span id="noticeText">新しい写真が届きました</span>
+      <button type="button" id="noticeDismiss">確認</button>
+    </div>
+
+    <div class="booth-header" style="text-align:left">
+      <h1>係員用 運用画面</h1>
+      <p class="subtitle">閲覧ブースの表示切り替えと、保管状況・処理履歴の確認</p>
+    </div>
+
+    <section class="panel">
+      <h2>表示の制御</h2>
+      <p class="hint">「次の<span id="slotCountHint">—</span>人を表示」で、まだ表示していない古い順にまとめて閲覧ブースへ出します。</p>
+
+      <div class="stats">
+        <span>未表示 <b id="waitingCount">0</b></span>
+        <span>生成中 <b id="processingCount">0</b></span>
+        <span>失敗 <b id="errorCount">0</b></span>
+        <span>保管中 <b id="totalCount">0</b></span>
+      </div>
+
+      <div class="control-row">
+        <button type="button" id="advanceBtn" class="primary">次の—人を表示</button>
+        <button type="button" id="clearBtn">表示を消す</button>
+        <button type="button" class="quiet" id="reloadBtn">最新の状態に更新</button>
+      </div>
+
+      <p class="now-showing">表示中: <b id="nowShowing">なし</b> <span id="displayUpdated"></span></p>
+    </section>
+
+    <section class="panel">
+      <h2>保管中の写真</h2>
+      <p class="hint">写真そのものは表示しません。ファイル名と撮影時刻のみ。</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>番号</th><th>撮影時刻</th><th>状態</th><th>ファイル名</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="entryRows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="entryEmpty">保管中の写真はありません</p>
+    </section>
+
+    <section class="panel">
+      <h2>処理履歴</h2>
+      <p class="hint">サーバーと各ブースのブラウザ双方の記録。ステータスコードとエラー内容を含みます。</p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>時刻</th><th>発生元</th><th>番号</th><th>イベント</th><th>状態</th><th>内容</th>
+            </tr>
+          </thead>
+          <tbody id="logRows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="logEmpty">履歴はまだありません</p>
+    </section>
+  </div>
+
+<script src="common.js"></script>
+<script>
+  const notice = document.getElementById('notice');
+  const noticeText = document.getElementById('noticeText');
+  const noticeDismiss = document.getElementById('noticeDismiss');
+  const slotCountHint = document.getElementById('slotCountHint');
+  const advanceBtn = document.getElementById('advanceBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const waitingCount = document.getElementById('waitingCount');
+  const processingCount = document.getElementById('processingCount');
+  const errorCount = document.getElementById('errorCount');
+  const totalCount = document.getElementById('totalCount');
+  const nowShowing = document.getElementById('nowShowing');
+  const displayUpdated = document.getElementById('displayUpdated');
+  const entryRows = document.getElementById('entryRows');
+  const entryEmpty = document.getElementById('entryEmpty');
+  const logRows = document.getElementById('logRows');
+  const logEmpty = document.getElementById('logEmpty');
+
+  const REFRESH_MS = 3000;
+
+  // 通知の判定用。ここより大きい番号が現れたら新しい写真
+  let lastSeenSequence = 0;
+  let firstLoad = true;
+  let pendingNotice = 0;
+
+  const timeText = (iso) => new Date(iso).toLocaleTimeString('ja-JP', { hour12: false });
+
+  function statusTag(entry) {
+    if (entry.status === 'processing') return { cls: 'tag-processing', text: '生成中' };
+    if (entry.status === 'error') return { cls: 'tag-error', text: '失敗' };
+    if (entry.viewed_at) return { cls: 'tag-viewed', text: '表示済み' };
+    return { cls: 'tag-ready', text: '未表示' };
+  }
+
+  function showNotice(count, latestSequence) {
+    pendingNotice += count;
+    noticeText.textContent = `新しい写真が ${pendingNotice} 件届きました（最新: 番号 ${latestSequence}）`;
+    notice.hidden = false;
+  }
+
+  noticeDismiss.addEventListener('click', () => {
+    pendingNotice = 0;
+    notice.hidden = true;
+  });
+
+  function renderEntries(entries) {
+    entryEmpty.hidden = entries.length > 0;
+    // 新しいものを上に出す
+    const rows = [...entries].reverse().map((entry) => {
+      const tr = document.createElement('tr');
+
+      const seq = document.createElement('td');
+      seq.className = 'mono';
+      seq.textContent = String(entry.sequence);
+
+      const at = document.createElement('td');
+      at.className = 'mono';
+      at.textContent = timeText(entry.captured_at);
+
+      const state = document.createElement('td');
+      const tag = statusTag(entry);
+      const span = document.createElement('span');
+      span.className = `tag ${tag.cls}`;
+      span.textContent = tag.text;
+      state.append(span);
+      if (entry.error) {
+        const err = document.createElement('div');
+        err.className = 'level-error';
+        err.textContent = entry.error;
+        state.append(err);
+      }
+
+      const files = document.createElement('td');
+      files.className = 'files';
+      files.textContent = entry.files.join('\n') || '—';
+
+      const action = document.createElement('td');
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'row-del';
+      del.textContent = '削除';
+      del.addEventListener('click', async () => {
+        del.disabled = true;
+        try {
+          await callApi(`/api/entries/${entry.id}`, { method: 'DELETE' });
+          await refresh();
+        } catch (err) {
+          del.disabled = false;
+        }
+      });
+      action.append(del);
+
+      tr.append(seq, at, state, files, action);
+      return tr;
+    });
+    entryRows.replaceChildren(...rows);
+  }
+
+  function renderLogs(logs) {
+    logEmpty.hidden = logs.length > 0;
+    const rows = logs.map((log) => {
+      const tr = document.createElement('tr');
+
+      const at = document.createElement('td');
+      at.className = 'mono';
+      at.textContent = timeText(log.at);
+
+      const source = document.createElement('td');
+      const tag = document.createElement('span');
+      tag.className = `tag ${log.source === 'client' ? 'tag-client' : 'tag-server'}`;
+      tag.textContent = log.source === 'client' ? 'クライアント' : 'サーバー';
+      source.append(tag);
+
+      const seq = document.createElement('td');
+      seq.className = 'mono';
+      seq.textContent = log.sequence ?? '—';
+
+      const event = document.createElement('td');
+      event.className = 'mono';
+      event.textContent = log.event;
+
+      const status = document.createElement('td');
+      status.className = 'mono';
+      status.textContent = log.status ?? '—';
+
+      const message = document.createElement('td');
+      message.className = 'msg';
+      if (log.level !== 'info') message.classList.add(`level-${log.level}`);
+      message.textContent = log.message || '—';
+
+      tr.append(at, source, seq, event, status, message);
+      return tr;
+    });
+    logRows.replaceChildren(...rows);
+  }
+
+  function renderDisplay(display) {
+    slotCountHint.textContent = String(display.slot_count);
+    advanceBtn.textContent = `次の${display.slot_count}人を表示`;
+    nowShowing.textContent = display.entries.length > 0
+      ? display.entries.map((entry) => `番号 ${entry.sequence}`).join(' / ')
+      : 'なし';
+    displayUpdated.textContent = display.updated_at ? `（${timeText(display.updated_at)} 更新）` : '';
+  }
+
+  async function refresh() {
+    let data;
+    let display;
+    let logData;
+    try {
+      [data, display, logData] = await Promise.all([
+        callApi('/api/entries'),
+        callApi('/api/display'),
+        callApi('/api/logs?limit=100')
+      ]);
+    } catch (err) {
+      return;
+    }
+
+    waitingCount.textContent = String(data.waiting);
+    processingCount.textContent = String(data.processing);
+    errorCount.textContent = String(data.entries.filter((entry) => entry.status === 'error').length);
+    totalCount.textContent = String(data.entries.length);
+
+    // 新しく撮影された写真を画面上部で知らせる
+    const maxSequence = data.entries.reduce((max, entry) => Math.max(max, entry.sequence), 0);
+    if (!firstLoad && maxSequence > lastSeenSequence) {
+      const added = data.entries.filter((entry) => entry.sequence > lastSeenSequence).length;
+      showNotice(added, maxSequence);
+    }
+    lastSeenSequence = Math.max(lastSeenSequence, maxSequence);
+    firstLoad = false;
+
+    renderEntries(data.entries);
+    renderDisplay(display);
+    renderLogs(logData.logs);
+  }
+
+  advanceBtn.addEventListener('click', async () => {
+    advanceBtn.disabled = true;
+    try {
+      const display = await callApi('/api/display/advance', { method: 'POST' });
+      renderDisplay(display);
+      pendingNotice = 0;
+      notice.hidden = true;
+      await refresh();
+    } catch (err) {
+      // 表示できる受付がない場合もここに来る。履歴に残るので画面は変えない
+    } finally {
+      advanceBtn.disabled = false;
+    }
+  });
+
+  clearBtn.addEventListener('click', async () => {
+    clearBtn.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/display/clear', { method: 'POST' }));
+    } catch (err) {
+      // 失敗は履歴に残る
+    } finally {
+      clearBtn.disabled = false;
+    }
+  });
+
+  reloadBtn.addEventListener('click', refresh);
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

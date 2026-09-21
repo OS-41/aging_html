@@ -33,15 +33,38 @@ const BACKEND_ORIGIN = new URL(BACKEND_BASE, window.location.href).origin;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 履歴送信そのものが失敗したときに再帰しないためのフラグ
+let sendingLog = false;
+
+/**
+ * 係員画面の処理履歴に、このブラウザでの出来事を残す。
+ * 送信自体の失敗は握りつぶす(展示の進行を止めないため)。
+ */
+function logEvent({ level = 'info', event, message = '', status = null, sequence = null }) {
+  if (sendingLog) return;
+  sendingLog = true;
+
+  fetch(BACKEND_BASE + '/api/logs', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ level, event, message: String(message), status, sequence })
+  })
+    .catch(() => {})
+    .finally(() => { sendingLog = false; });
+}
+
 /**
  * APIを呼び出してJSONを返す。Basic認証の資格情報を送るため
  * credentialsは既定の'same-origin'のままにする。
+ * 失敗した場合はステータスコード付きで処理履歴に残す。
  */
 async function callApi(apiPath, options = {}) {
   let res;
   try {
     res = await fetch(BACKEND_BASE + apiPath, { credentials: 'same-origin', ...options });
   } catch (networkErr) {
+    logEvent({ level: 'error', event: 'fetch:failed', message: `${apiPath} ${networkErr.message}` });
     throw new Error(`サーバーに接続できません。詳細: ${networkErr.message}`);
   }
 
@@ -51,6 +74,12 @@ async function callApi(apiPath, options = {}) {
 
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
+    logEvent({
+      level: 'error',
+      event: 'fetch:error',
+      status: res.status,
+      message: `${apiPath} ${payload.error || ''}`
+    });
     const error = new Error(payload.error || `リクエストが失敗しました (${res.status})`);
     error.status = res.status;
     error.payload = payload;
