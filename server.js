@@ -232,6 +232,10 @@ const DISPLAY_SLOT_COUNT = 4;
 let displayBatch = [];
 let displayUpdatedAtMs = null;
 
+// 閲覧ブースの待機演出の絵柄。係員画面から切り替える(仮運用)
+const DISPLAY_THEMES = ['realistic', 'storybook'];
+let displayTheme = 'realistic';
+
 // ---- 処理履歴 ----
 // 係員が会場でトラブルを追えるよう、サーバーの処理とクライアント(各ブースの
 // ブラウザ)の通信結果を同じ時系列に残す。ステータスコードとエラーメッセージも含める。
@@ -332,6 +336,8 @@ function currentDisplay() {
   return {
     slot_count: DISPLAY_SLOT_COUNT,
     updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
+    theme: displayTheme,
+    themes: DISPLAY_THEMES,
     entries
   };
 }
@@ -664,6 +670,22 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     event: 'display:advance',
     message: `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示`
   });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/display/theme
+ * 閲覧ブースの待機演出の絵柄を切り替える(仮運用)。
+ * body: { "theme": "realistic" | "storybook" }
+ */
+router.post('/api/display/theme', requireBasicAuth, (req, res) => {
+  const theme = req.body?.theme;
+  if (!DISPLAY_THEMES.includes(theme)) {
+    return res.status(400).json({ error: '未知の絵柄です', themes: DISPLAY_THEMES });
+  }
+
+  displayTheme = theme;
+  addLog({ event: 'display:theme', message: `待機演出を ${theme} に切り替え` });
   res.json(currentDisplay());
 });
 

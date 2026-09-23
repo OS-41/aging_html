@@ -222,6 +222,14 @@
       </div>
 
       <p class="now-showing">表示中: <b id="nowShowing">なし</b> <span id="displayUpdated"></span></p>
+
+      <p class="now-showing" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        待機演出の絵柄（仮）
+        <select id="themeSelect">
+          <option value="realistic">海の中（写実寄り）</option>
+          <option value="storybook">絵本風（デフォルメ）</option>
+        </select>
+      </p>
     </section>
 
     <section class="panel">
@@ -287,6 +295,7 @@
   const advanceBtn = document.getElementById('advanceBtn');
   const clearBtn = document.getElementById('clearBtn');
   const reloadBtn = document.getElementById('reloadBtn');
+  const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
   const processingCount = document.getElementById('processingCount');
   const errorCount = document.getElementById('errorCount');
@@ -478,6 +487,9 @@
       ? display.entries.map((entry) => `番号 ${entry.sequence}`).join(' / ')
       : 'なし';
     displayUpdated.textContent = display.updated_at ? `（${timeText(display.updated_at)} 更新）` : '';
+    if (display.theme && document.activeElement !== themeSelect) {
+      themeSelect.value = display.theme;
+    }
   }
 
   async function refresh() {
@@ -539,6 +551,21 @@
       // 失敗は履歴に残る
     } finally {
       clearBtn.disabled = false;
+    }
+  });
+
+  themeSelect.addEventListener('change', async () => {
+    themeSelect.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/display/theme', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: themeSelect.value })
+      }));
+    } catch (err) {
+      // 失敗は履歴に残る
+    } finally {
+      themeSelect.disabled = false;
     }
   });
 
