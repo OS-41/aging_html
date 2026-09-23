@@ -239,6 +239,34 @@ const MAX_LOG_ENTRIES = 500;
 const logStore = [];
 let logSequence = 0;
 
+// ---- 各ブースとの通信状況 ----
+// どのブースが今も繋がっているかを係員が把握できるよう、各ページから
+// 定期的に届く鼓動(heartbeat)を記録する。一定時間途絶えたら切断とみなす。
+const CLIENT_OFFLINE_MS = 20 * 1000;
+const clientStore = new Map();
+
+// aging APIとの通信状況
+const agingApiHealth = {
+  lastStatus: null,
+  lastAtMs: null,
+  lastError: null,
+  okCount: 0,
+  errorCount: 0
+};
+
+function recordAgingApiCall(status, errorMessage = null) {
+  agingApiHealth.lastStatus = status;
+  agingApiHealth.lastAtMs = Date.now();
+  agingApiHealth.lastError = errorMessage;
+  if (errorMessage || !status || status >= 400) {
+    agingApiHealth.errorCount += 1;
+  } else {
+    agingApiHealth.okCount += 1;
+  }
+}
+
+const SERVER_STARTED_AT_MS = Date.now();
+
 /**
  * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
  */
@@ -401,6 +429,7 @@ async function startAgingTask(srcFileUrl, sequence) {
 
   const payload = await res.json().catch(() => ({}));
   const taskId = payload?.data?.task_id;
+  recordAgingApiCall(res.status, taskId ? null : 'task_idが返りませんでした');
   addLog({
     level: taskId ? 'info' : 'error',
     event: 'aging:start',
@@ -428,11 +457,13 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
     const taskStatus = payload?.data?.task_status;
 
     if (taskStatus === 'success') {
+      recordAgingApiCall(res.status);
       addLog({ event: 'aging:success', status: res.status, sequence, message: `${attempt}回目のポーリングで完了` });
       return payload.data.results;
     }
     if (taskStatus === 'error') {
       const detail = payload?.data?.error_message || payload?.data?.error || '生成に失敗しました';
+      recordAgingApiCall(res.status, detail);
       addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
       throw new Error(detail);
     }
@@ -645,6 +676,77 @@ router.post('/api/display/clear', requireBasicAuth, (req, res) => {
   displayUpdatedAtMs = Date.now();
   addLog({ event: 'display:clear', message: '表示を消去' });
   res.json(currentDisplay());
+});
+
+/**
+ * POST /api/heartbeat
+ * 各ブースのページから定期的に届く生存確認。往復時間やエラー件数も受け取り、
+ * 係員画面で「どのブースが今も繋がっているか」を見えるようにする。
+ */
+router.post('/api/heartbeat', requireBasicAuth, (req, res) => {
+  const { client_id: clientId, role, page, latency_ms: latencyMs, error_count: errorCount } = req.body || {};
+  if (!clientId) {
+    return res.status(400).json({ error: 'client_idが指定されていません' });
+  }
+
+  const known = clientStore.get(clientId);
+  clientStore.set(clientId, {
+    id: String(clientId).slice(0, 64),
+    role: String(role || 'unknown').slice(0, 32),
+    page: String(page || '').slice(0, 64),
+    firstSeenMs: known?.firstSeenMs || Date.now(),
+    lastSeenMs: Date.now(),
+    latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+    errorCount: Number.isInteger(errorCount) ? errorCount : 0,
+    beats: (known?.beats || 0) + 1
+  });
+
+  res.json({ server_time: new Date().toISOString() });
+});
+
+/**
+ * GET /api/status
+ * 各ブースとの通信状況、aging APIとの通信状況、サーバーの稼働状況。
+ */
+router.get('/api/status', requireBasicAuth, (req, res) => {
+  const now = Date.now();
+
+  // 長く音沙汰のないクライアントは一覧から落とす
+  for (const [clientId, client] of clientStore) {
+    if (now - client.lastSeenMs > 10 * 60 * 1000) {
+      clientStore.delete(clientId);
+    }
+  }
+
+  res.json({
+    server: {
+      now: new Date(now).toISOString(),
+      started_at: new Date(SERVER_STARTED_AT_MS).toISOString(),
+      uptime_ms: now - SERVER_STARTED_AT_MS,
+      entries: entryStore.size,
+      logs: logStore.length
+    },
+    aging_api: {
+      last_status: agingApiHealth.lastStatus,
+      last_at: agingApiHealth.lastAtMs ? new Date(agingApiHealth.lastAtMs).toISOString() : null,
+      last_error: agingApiHealth.lastError,
+      ok_count: agingApiHealth.okCount,
+      error_count: agingApiHealth.errorCount
+    },
+    clients: [...clientStore.values()]
+      .sort((a, b) => a.role.localeCompare(b.role) || a.firstSeenMs - b.firstSeenMs)
+      .map((client) => ({
+        id: client.id,
+        role: client.role,
+        page: client.page,
+        online: now - client.lastSeenMs <= CLIENT_OFFLINE_MS,
+        last_seen_at: new Date(client.lastSeenMs).toISOString(),
+        silent_ms: now - client.lastSeenMs,
+        latency_ms: client.latencyMs,
+        error_count: client.errorCount,
+        beats: client.beats
+      }))
+  });
 });
 
 /**

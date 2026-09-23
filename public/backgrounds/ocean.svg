@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1440" viewBox="0 0 1920 1440">
+  <defs>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b86b8"/>
+      <stop offset="0.35" stop-color="#14567f"/>
+      <stop offset="0.75" stop-color="#062f4d"/>
+      <stop offset="1" stop-color="#021826"/>
+    </linearGradient>
+    <linearGradient id="ray" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfe9ff" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#bfe9ff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="surfaceGlow" cx="0.5" cy="0" r="0.8">
+      <stop offset="0" stop-color="#d8f3ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#d8f3ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1920" height="1440" fill="url(#water)"/>
+  <rect width="1920" height="700" fill="url(#surfaceGlow)"/>
+
+  <!-- 水面から差し込む光の筋 -->
+  <g>
+    <polygon points="240,0 400,0 300,1440 120,1440" fill="url(#ray)"/>
+    <polygon points="700,0 790,0 720,1440 580,1440" fill="url(#ray)" opacity="0.7"/>
+    <polygon points="1150,0 1320,0 1330,1440 1120,1440" fill="url(#ray)" opacity="0.85"/>
+    <polygon points="1600,0 1700,0 1780,1440 1600,1440" fill="url(#ray)" opacity="0.6"/>
+  </g>
+
+  <!-- 遠景の岩場 -->
+  <path d="M0 1240 L180 1090 L330 1210 L470 1060 L640 1230 L760 1150 L900 1260 L1060 1120 L1220 1240 L1380 1130 L1530 1250 L1700 1110 L1860 1230 L1920 1180 L1920 1440 L0 1440 Z"
+        fill="#021420" opacity="0.85"/>
+  <path d="M0 1330 L220 1250 L420 1340 L620 1260 L820 1350 L1020 1270 L1240 1350 L1460 1265 L1700 1345 L1920 1280 L1920 1440 L0 1440 Z"
+        fill="#010d16"/>
+
+  <!-- 海藻 -->
+  <g fill="none" stroke="#0a3d3f" stroke-linecap="round" opacity="0.7">
+    <path d="M150 1440 C110 1300 190 1250 140 1120" stroke="#0b4a45" stroke-width="16"/>
+    <path d="M205 1440 C240 1320 170 1270 230 1160" stroke="#0b4a45" stroke-width="12"/>
+    <path d="M1720 1440 C1770 1310 1690 1260 1750 1140" stroke="#0b4a45" stroke-width="15"/>
+    <path d="M1790 1440 C1750 1330 1830 1280 1780 1180" stroke="#0b4a45" stroke-width="11"/>
+  </g>
+
+  <!-- 漂う気泡 -->
+  <g fill="#ffffff" opacity="0.28">
+    <circle cx="300" cy="380" r="9"/>
+    <circle cx="345" cy="300" r="5"/>
+    <circle cx="268" cy="250" r="6"/>
+    <circle cx="1480" cy="520" r="11"/>
+    <circle cx="1530" cy="430" r="6"/>
+    <circle cx="1445" cy="360" r="7"/>
+    <circle cx="880" cy="640" r="8"/>
+    <circle cx="920" cy="560" r="5"/>
+    <circle cx="640" cy="880" r="7"/>
+    <circle cx="1180" cy="820" r="6"/>
+  </g>
+
+  <!-- 遠くを泳ぐ魚影 -->
+  <g fill="#03293f" opacity="0.75">
+    <path d="M1380 640 q42 -26 84 0 q-42 26 -84 0 z M1380 640 l-22 -16 l0 32 z"/>
+    <path d="M1300 700 q34 -21 68 0 q-34 21 -68 0 z M1300 700 l-18 -13 l0 26 z"/>
+    <path d="M1430 730 q28 -17 56 0 q-28 17 -56 0 z M1430 730 l-15 -11 l0 22 z"/>
+  </g>
+  <g fill="#03293f" opacity="0.5">
+    <path d="M420 560 q50 -30 100 0 q-50 30 -100 0 z M420 560 l-26 -19 l0 38 z"/>
+  </g>
+</svg>

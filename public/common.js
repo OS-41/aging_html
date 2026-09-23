@@ -36,6 +36,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 履歴送信そのものが失敗したときに再帰しないためのフラグ
 let sendingLog = false;
 
+// このページで発生した通信エラーの累計(係員画面の通信状況で表示する)
+let clientErrorCount = 0;
+
 /**
  * 係員画面の処理履歴に、このブラウザでの出来事を残す。
  * 送信自体の失敗は握りつぶす(展示の進行を止めないため)。
@@ -64,6 +67,7 @@ async function callApi(apiPath, options = {}) {
   try {
     res = await fetch(BACKEND_BASE + apiPath, { credentials: 'same-origin', ...options });
   } catch (networkErr) {
+    clientErrorCount += 1;
     logEvent({ level: 'error', event: 'fetch:failed', message: `${apiPath} ${networkErr.message}` });
     throw new Error(`サーバーに接続できません。詳細: ${networkErr.message}`);
   }
@@ -74,6 +78,7 @@ async function callApi(apiPath, options = {}) {
 
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
+    clientErrorCount += 1;
     logEvent({
       level: 'error',
       event: 'fetch:error',
@@ -86,6 +91,51 @@ async function callApi(apiPath, options = {}) {
     throw error;
   }
   return payload;
+}
+
+/**
+ * 係員画面で通信状況を見られるよう、このページの生存を定期的に伝える。
+ * 送信にかかった往復時間と、これまでの通信エラー件数も一緒に送る。
+ * @param {string} role - 'capture' | 'view' | 'staff'
+ */
+function startHeartbeat(role, intervalMs = 5000) {
+  let clientId;
+  try {
+    clientId = sessionStorage.getItem('boothClientId');
+    if (!clientId) {
+      clientId = `${role}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem('boothClientId', clientId);
+    }
+  } catch (err) {
+    // sessionStorageが使えない環境では毎回新しいIDになる
+    clientId = `${role}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  let latencyMs = null;
+
+  async function beat() {
+    const startedAt = performance.now();
+    try {
+      await fetch(BACKEND_BASE + '/api/heartbeat', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: clientId,
+          role,
+          page: window.location.pathname,
+          latency_ms: latencyMs,
+          error_count: clientErrorCount
+        })
+      });
+      latencyMs = performance.now() - startedAt;
+    } catch (err) {
+      latencyMs = null;
+    }
+  }
+
+  beat();
+  setInterval(beat, intervalMs);
 }
 
 /**

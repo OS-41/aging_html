@@ -13,9 +13,51 @@
     -webkit-user-select: text;
   }
   .booth {
-    max-width: 1200px;
+    max-width: none;
     gap: 16px;
     align-items: stretch;
+  }
+
+  /* 左半分に操作と一覧、右半分に処理履歴を大きく置く */
+  .console {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    gap: 16px;
+    min-height: 0;
+  }
+  .console > .col-left {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+  }
+  .console > .col-right {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .col-right .panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .col-right .table-scroll {
+    flex: 1;
+    max-height: none;
+  }
+  /* 画面が狭いときは縦に積む */
+  @media (max-width: 1100px) {
+    .console {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto;
+    }
+    .console > .col-right { grid-column: 1; grid-row: auto; }
+    .col-right .table-scroll { max-height: 420px; }
   }
 
   /* 新しい写真が届いたことを知らせる通知 */
@@ -159,6 +201,9 @@
       <p class="subtitle">閲覧ブースの表示切り替えと、保管状況・処理履歴の確認</p>
     </div>
 
+    <div class="console">
+    <div class="col-left">
+
     <section class="panel">
       <h2>表示の制御</h2>
       <p class="hint">「次の<span id="slotCountHint">—</span>人を表示」で、まだ表示していない古い順にまとめて閲覧ブースへ出します。</p>
@@ -180,9 +225,24 @@
     </section>
 
     <section class="panel">
+      <h2>通信状況</h2>
+      <p class="hint">各ブースの画面からの応答と、aging APIとの通信結果。</p>
+      <div class="table-scroll" style="max-height:200px">
+        <table>
+          <thead>
+            <tr><th>ブース</th><th>状態</th><th>最終応答</th><th>往復</th><th>エラー</th></tr>
+          </thead>
+          <tbody id="clientRows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="clientEmpty">接続中の画面はありません</p>
+      <p class="now-showing" id="apiStatus">aging API: —</p>
+    </section>
+
+    <section class="panel" style="flex:1; display:flex; flex-direction:column; min-height:0">
       <h2>保管中の写真</h2>
       <p class="hint">写真そのものは表示しません。ファイル名と撮影時刻のみ。</p>
-      <div class="table-scroll">
+      <div class="table-scroll" style="flex:1; max-height:none">
         <table>
           <thead>
             <tr>
@@ -194,6 +254,9 @@
       </div>
       <p class="empty" id="entryEmpty">保管中の写真はありません</p>
     </section>
+
+    </div>
+    <div class="col-right">
 
     <section class="panel">
       <h2>処理履歴</h2>
@@ -210,6 +273,9 @@
       </div>
       <p class="empty" id="logEmpty">履歴はまだありません</p>
     </section>
+
+    </div>
+    </div>
   </div>
 
 <script src="common.js"></script>
@@ -230,6 +296,9 @@
   const entryRows = document.getElementById('entryRows');
   const entryEmpty = document.getElementById('entryEmpty');
   const logRows = document.getElementById('logRows');
+  const clientRows = document.getElementById('clientRows');
+  const clientEmpty = document.getElementById('clientEmpty');
+  const apiStatus = document.getElementById('apiStatus');
   const logEmpty = document.getElementById('logEmpty');
 
   const REFRESH_MS = 3000;
@@ -350,6 +419,58 @@
     logRows.replaceChildren(...rows);
   }
 
+  const roleLabels = { capture: '撮影ブース', view: '閲覧ブース', staff: '係員画面' };
+
+  /**
+   * 各ブースとの通信状況と、aging APIとの通信結果を描画する。
+   */
+  function renderStatus(status) {
+    clientEmpty.hidden = status.clients.length > 0;
+
+    const rows = status.clients.map((client) => {
+      const tr = document.createElement('tr');
+
+      const role = document.createElement('td');
+      role.textContent = roleLabels[client.role] || client.role;
+      const page = document.createElement('div');
+      page.className = 'mono';
+      page.style.color = 'var(--muted)';
+      page.style.fontSize = '11px';
+      page.textContent = client.page;
+      role.append(page);
+
+      const state = document.createElement('td');
+      const tag = document.createElement('span');
+      tag.className = `tag ${client.online ? 'tag-ready' : 'tag-error'}`;
+      tag.textContent = client.online ? '接続中' : '応答なし';
+      state.append(tag);
+
+      const seen = document.createElement('td');
+      seen.className = 'mono';
+      seen.textContent = `${Math.round(client.silent_ms / 1000)}秒前`;
+
+      const latency = document.createElement('td');
+      latency.className = 'mono';
+      latency.textContent = client.latency_ms === null ? '—' : `${client.latency_ms}ms`;
+
+      const errors = document.createElement('td');
+      errors.className = 'mono' + (client.error_count > 0 ? ' level-error' : '');
+      errors.textContent = String(client.error_count);
+
+      tr.append(role, state, seen, latency, errors);
+      return tr;
+    });
+    clientRows.replaceChildren(...rows);
+
+    const api = status.aging_api;
+    if (!api.last_at) {
+      apiStatus.textContent = 'aging API: まだ通信していません';
+    } else {
+      const state = api.last_error ? `失敗 (${api.last_error})` : `正常 (${api.last_status})`;
+      apiStatus.textContent = `aging API: ${state} ／ 最終 ${timeText(api.last_at)} ／ 成功 ${api.ok_count} 失敗 ${api.error_count}`;
+    }
+  }
+
   function renderDisplay(display) {
     slotCountHint.textContent = String(display.slot_count);
     advanceBtn.textContent = `次の${display.slot_count}人を表示`;
@@ -363,11 +484,13 @@
     let data;
     let display;
     let logData;
+    let statusData;
     try {
-      [data, display, logData] = await Promise.all([
+      [data, display, logData, statusData] = await Promise.all([
         callApi('/api/entries'),
         callApi('/api/display'),
-        callApi('/api/logs?limit=100')
+        callApi('/api/logs?limit=200'),
+        callApi('/api/status')
       ]);
     } catch (err) {
       return;
@@ -390,6 +513,7 @@
     renderEntries(data.entries);
     renderDisplay(display);
     renderLogs(logData.logs);
+    renderStatus(statusData);
   }
 
   advanceBtn.addEventListener('click', async () => {
@@ -420,6 +544,7 @@
 
   reloadBtn.addEventListener('click', refresh);
 
+  startHeartbeat('staff');
   refresh();
   setInterval(refresh, REFRESH_MS);
 </script>
