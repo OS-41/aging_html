@@ -11,30 +11,39 @@
  *   scene.start();          // 待機中はゆるやかに煙が漂う
  *   scene.play();           // 入れ替えの演出を最初から流す
  *
+ * 待機中は玉手箱が閉じていて、煙は出ていない。係員が結果画面へ移すと
+ * ふたがゆっくり消え、消えきってから煙が立ちのぼる。いちど出した煙は
+ * 待機画面に戻すまで消さない。
+ *
  * 流れ(括弧内は既定の長さ):
- *   opening  (0.9s) 玉手箱のふたが開き、最初のひと筋が立ちのぼる
- *   filling  (1.2s) 煙が画面いっぱいに広がる
- *   veiled   (0.5s) 完全に覆われている間に写真を入れ替える
- *   clearing (1.8s) 煙が右上へ引いて、背景と写真が現れる
- *   settled  (2.5s) そのまま見せる
- *   zooming  (1.8s) 写真へゆっくり寄る
- *   done           演出の終わり(待機中の漂いに戻る)
+ *   lifting  (1.6s) 閉じたふたがゆっくり消えていく。煙はまだ出さない
+ *   rising   (1.0s) 口から最初のひと筋が立ちのぼる
+ *   filling  (1.4s) 煙が画面いっぱいに広がる
+ *   veiled   (0.6s) 完全に覆われている間に写真を入れ替える
+ *   settling (1.6s) 写真が見える濃さまで薄れる。ここで止まり、引いていかない
+ *   done           演出の終わり。煙はそのまま漂い続ける
  *
  * onPhase(phase, progress) で各段階を呼び出し側へ伝える。写真の差し替えは
- * veiled、拡大は zooming を受け取って view.html 側で行う。
+ * veiled を受け取って view.html 側で行う。
+ * 待機画面へ戻すときは close() を呼ぶと、煙が消えてふたが戻る。
  */
 (function (global) {
   'use strict';
 
   // 各段階の長さ(ミリ秒)
   const PHASES = [
-    ['opening', 900],
-    ['filling', 1200],
-    ['veiled', 500],
-    ['clearing', 1800],
-    ['settled', 2500],
-    ['zooming', 1800]
+    ['lifting', 1600],
+    ['rising', 1000],
+    ['filling', 1400],
+    ['veiled', 600],
+    ['settling', 1600]
   ];
+
+  // 写真を出しているあいだ、煙を漂わせておく濃さ。
+  // かたまりが重なるため、1つあたりはかなり薄くしないと画面が白く飛ぶ。
+  const SETTLED_ALPHA = 0.2;
+  // 待機画面へ戻すときに煙が消えるまでの時間
+  const CLOSE_MS = 1200;
 
   // 背景の絵に合わせた煙の色。白ではなく、うすい藤色と桜色を重ねる
   const PUFF_COLORS = [
@@ -66,8 +75,11 @@
 
     let puffs = [];
     let running = false;
-    let playStartMs = 0;      // 0なら演出中ではない(待機中の漂いだけ)
+    let playStartMs = 0;      // 0なら演出中ではない
+    let closeStartMs = 0;     // 待機画面へ戻す演出の開始時刻
     let lastPhase = null;
+    // 演出を流し終えたか。写真を出しているあいだは煙を残す
+    let revealed = false;
 
     /**
      * 煙のかたまりを組み立てる。1つのかたまりは重なった丸の集まりで、
@@ -132,6 +144,51 @@
     }
 
     /**
+     * 閉じたふた。背景の絵の玉手箱は開いた状態で描かれているため、
+     * その口を覆う板を重ねて「まだ閉じている」ように見せる。
+     * 水彩の絵に馴染むよう、輪郭線を持たせずぼかした色面で描く。
+     * @param {number} opacity - 1で閉じきり、0で消えた状態
+     */
+    function drawLid(opacity) {
+      if (opacity <= 0.01) return;
+      const { width: w, height: h } = canvas;
+      const s = Math.max(w, h) * 0.075;
+      const x = w * BOX.x;
+      const y = h * BOX.y;
+
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.translate(x, y);
+      ctx.rotate(-0.1);
+
+      // 箱に載っているように見せるための落ち影
+      ctx.filter = 'blur(10px)';
+      ctx.fillStyle = 'rgba(58, 38, 20, 0.45)';
+      ctx.beginPath();
+      ctx.ellipse(0, s * 0.3, s * 0.98, s * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ふたの板。水彩の絵に馴染むよう輪郭はぼかす
+      ctx.filter = 'blur(2.5px)';
+      ctx.fillStyle = '#7a4f28';
+      ctx.beginPath();
+      ctx.roundRect(-s * 0.92, -s * 0.3, s * 1.84, s * 0.56, s * 0.12);
+      ctx.fill();
+
+      // 上面の明るい面と、金の帯
+      ctx.fillStyle = '#9a6b38';
+      ctx.beginPath();
+      ctx.roundRect(-s * 0.86, -s * 0.26, s * 1.72, s * 0.26, s * 0.1);
+      ctx.fill();
+      ctx.fillStyle = '#d4a94e';
+      ctx.beginPath();
+      ctx.roundRect(-s * 0.92, -s * 0.04, s * 1.84, s * 0.11, s * 0.05);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    /**
      * 玉手箱が開いた合図。箱そのものは背景の絵に描かれているので、
      * ここでは口から漏れる光だけを重ねる。絵柄を壊さないよう、
      * 輪郭のない淡い光にとどめる。
@@ -172,19 +229,40 @@
     }
 
     /**
-     * 段階ごとの「煙の広がり具合」(0=玉手箱のそば, 1=画面いっぱい)と濃さ。
+     * 段階ごとの「煙の広がり具合」(0=玉手箱のそば, 1=画面いっぱい)と濃さ、
+     * ふたの残り具合、口から漏れる光の強さ。
      */
     function smokeShape(phase, progress) {
       switch (phase) {
-        // ふたが開いて、ひと筋が立ちのぼる
-        case 'opening': return { spread: 0.12 * easeOut(progress), alpha: 0.75 * progress, glow: easeOut(progress) };
+        // ふたがゆっくり消える。煙はまだ出さない
+        case 'lifting':
+          return { spread: 0, alpha: 0, lid: 1 - easeInOut(progress), glow: easeInOut(progress) * 0.7 };
+        // ふたが消えきってから、ひと筋が立ちのぼる
+        case 'rising':
+          return { spread: 0.14 * easeOut(progress), alpha: 0.8 * progress, lid: 0, glow: 0.7 + 0.3 * progress };
         // 画面いっぱいに広がる
-        case 'filling': return { spread: 0.12 + 0.88 * easeInOut(progress), alpha: 0.75 + 0.25 * progress, glow: 1 - progress };
+        case 'filling':
+          return { spread: 0.14 + 0.86 * easeInOut(progress), alpha: 0.8 + 0.2 * progress, lid: 0, glow: 1 - progress };
         // 完全に覆う(この間に写真を入れ替える)
-        case 'veiled': return { spread: 1, alpha: 1, glow: 0 };
-        // 右上へ引いていく
-        case 'clearing': return { spread: 1 - easeInOut(progress), alpha: 1 - 0.55 * easeInOut(progress), glow: 0 };
-        default: return { spread: 0, alpha: 0.45, glow: 0 };
+        case 'veiled':
+          return { spread: 1, alpha: 1, lid: 0, glow: 0 };
+        // 写真が見える濃さまで薄れる。広がりは保ったままにして、煙を引かせない
+        case 'settling':
+          return { spread: 1, alpha: 1 - (1 - SETTLED_ALPHA) * easeInOut(progress), lid: 0, glow: 0 };
+        default:
+          return { spread: 1, alpha: SETTLED_ALPHA, lid: 0, glow: 0 };
+      }
+    }
+
+    /**
+     * 画面いっぱいに広がりきった煙を、指定の濃さで漂わせる。
+     * 写真を出しているあいだ、これを描き続ける。
+     */
+    function drawSettledSmoke(alpha, time) {
+      const h = canvas.height;
+      for (const puff of puffs) {
+        const float = Math.sin(time * puff.drift + puff.phase) * h * 0.02;
+        drawPuff(puff, puff.fullX, puff.fullY + float, puff.fullR, alpha, time);
       }
     }
 
@@ -194,11 +272,27 @@
       const time = nowMs / 1000;
       ctx.clearRect(0, 0, w, h);
 
-      // 演出中でなければ、背景の絵の煙に沿ってゆるやかに漂わせるだけ
+      // 待機画面へ戻す途中。煙が薄れ、入れ替わりにふたが戻る
+      if (closeStartMs) {
+        const t = clamp01((nowMs - closeStartMs) / CLOSE_MS);
+        if (t >= 1) {
+          closeStartMs = 0;
+          revealed = false;
+          drawLid(1);
+          return;
+        }
+        drawSettledSmoke(SETTLED_ALPHA * (1 - t), time);
+        drawLid(easeInOut(t));
+        return;
+      }
+
+      // 演出が済んだあと。待機画面に戻すまで煙は消さない
       if (!playStartMs) {
-        for (const puff of puffs) {
-          const float = Math.sin(time * puff.drift + puff.phase) * h * 0.012;
-          drawPuff(puff, puff.restX, puff.restY + float, puff.restR, 0.16, time);
+        if (revealed) {
+          drawSettledSmoke(SETTLED_ALPHA, time);
+        } else {
+          // 待機中は玉手箱が閉じていて、煙も出ていない
+          drawLid(1);
         }
         return;
       }
@@ -212,15 +306,18 @@
       if (name === 'done') {
         playStartMs = 0;
         lastPhase = null;
+        revealed = true;
+        drawSettledSmoke(SETTLED_ALPHA, time);
         return;
       }
 
-      const { spread, alpha, glow } = smokeShape(name, progress);
+      const { spread, alpha, lid, glow } = smokeShape(name, progress);
       const boxX = w * BOX.x;
       const boxY = h * BOX.y;
 
-      // 光は煙の下に置く(煙が広がるほど隠れていく)
+      // 光とふたは煙の下に置く(煙が広がるほど隠れていく)
       drawGlow(glow, time);
+      drawLid(lid);
 
       for (const puff of puffs) {
         // 遅い順番のかたまりほど後から出てくる
@@ -271,21 +368,39 @@
      * 煙を出さずに、写真の差し替えだけを呼び出し側へ伝える。
      */
     function play() {
+      closeStartMs = 0;
       if (reduceMotion) {
+        // 動きを抑える設定では煙を出さず、写真の差し替えだけを伝える
         onPhase('veiled', 0);
-        onPhase('settled', 0);
         onPhase('done', 1);
+        revealed = true;
+        drawFrame(performance.now());
         return;
       }
       playStartMs = performance.now();
       lastPhase = null;
     }
 
+    /**
+     * 待機画面へ戻す。煙が消え、入れ替わりにふたが閉じる。
+     */
+    function close() {
+      playStartMs = 0;
+      lastPhase = null;
+      if (!revealed) return;
+      if (reduceMotion) {
+        revealed = false;
+        drawFrame(performance.now());
+        return;
+      }
+      closeStartMs = performance.now();
+    }
+
     function isPlaying() {
       return playStartMs !== 0;
     }
 
-    return { canvas, reduceMotion, resize, start, stop, drawFrame, play, isPlaying };
+    return { canvas, reduceMotion, resize, start, stop, drawFrame, play, close, isPlaying };
   }
 
   global.createTamatebakoScene = createTamatebakoScene;
