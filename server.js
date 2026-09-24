@@ -130,9 +130,24 @@ function resolvePublicOrigin(candidate) {
     return null;
   }
 
+  return isDevelopmentOrigin(candidate) ? url.origin : null;
+}
+
+/**
+ * Codespacesの転送URLか、ローカル開発用のホストか。
+ * 外部APIに渡すURLの検証と、開発時のCORS許可の両方で使う。
+ * @param {string} candidate
+ */
+function isDevelopmentOrigin(candidate) {
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return false;
+  }
   const isCodespaces = url.protocol === 'https:' && /\.app\.github\.dev$/.test(url.hostname);
   const isLocal = ['localhost', '127.0.0.1'].includes(url.hostname);
-  return isCodespaces || isLocal ? url.origin : null;
+  return isCodespaces || isLocal;
 }
 
 // ルート定義はrouterにまとめ、公開パス(BASE_PATH)配下へまとめてマウントする
@@ -140,16 +155,24 @@ const router = express.Router();
 
 app.use(express.json());
 
-// CORS設定: どのオリジン(index.htmlを配信しているCodespaceのポート)からでも
-// アクセスできるようにする。Codespaceごとにポート転送URLのサブドメインが
-// 変わる（例: iOSのCodespacesアプリから開いた場合など）ため、オリジンを
-// 固定せず "*" を許可する。認証情報(Cookie)は使わないため credentials は
-// 有効にしない。
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
-}));
+//NOTE: ここからRender公開用のCORS設定。公開時はフロントとAPIを同一オリジンで配信するためCORSそのものが不要になる
+// 本番(PUBLIC_ORIGINあり)ではCORSヘッダーを一切付けない。ブラウザの
+// 同一オリジンポリシーがそのまま効き、他所のページからAPIを叩けなくなる。
+//
+// Codespaceでの開発時(PUBLIC_ORIGINなし)だけ、フロントを3000番から
+// 配信して5000番のAPIを叩く構成になるため許可する。ただし以前の "*" は
+// やめ、Codespacesの転送URLとローカルホストに限る。
+if (!PUBLIC_ORIGIN) {
+  app.use(cors({
+    origin: (origin, callback) => {
+      // Originヘッダーが無いものはCORSの対象外(curlや同一オリジン)
+      callback(null, !origin || isDevelopmentOrigin(origin));
+    },
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
+  }));
+}
+//NOTE: ここまでRender公開用のCORS設定
 
 // アップロード先ディレクトリ（存在しなければ作成）
 const UPLOAD_DIR = path.join(__dirname, 'uploads');

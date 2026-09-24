@@ -162,6 +162,10 @@ npm run serve:web
 `npm start` だけでフロントエンドとAPIを同一オリジンで配信する。
 `server.js` 内の `//NOTE:` コメントで囲まれた箇所が公開用の設定。
 
+CORSは `PUBLIC_ORIGIN` が未設定のとき(=Codespaceでの開発時)だけ有効になり、
+許可先もCodespacesの転送URLとローカルホストに限る。公開時は同一オリジン配信
+なのでCORSヘッダーを一切付けない。
+
 Renderのダッシュボードで設定する環境変数:
 
 | 変数 | 例 | 用途 |
