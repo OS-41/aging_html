@@ -11,6 +11,8 @@
 # どちらも「start / run というファイルをNodeで実行しろ」という意味で、
 #   Error: Cannot find module '/opt/render/project/src/start'
 # となって起動に失敗する。`node ` が前に残っていないか必ず確かめること。
+# (保険としてリポジトリ直下に start.js を置いてあるため `node start` でも
+#  起動はするが、設定自体は下の startCommand に直しておくこと)
 services:
   - type: web
     name: aging-demo

@@ -175,11 +175,17 @@ Renderのダッシュボードで設定する環境変数:
 
 **Start Commandは入力欄を一度すべて消してから打つこと。** Renderの入力欄には
 `node index.js` のような既定値が入っていることがあり、後半だけを書き換えると
-`node start` や `node run start` という命令になる。どちらも「start / run という
-ファイルをNodeで実行しろ」という意味で、
+`node start` や `node run start` という命令になる。これは「start / run という
+ファイルをNodeで実行しろ」という意味で、本来なら
 `Cannot find module '/opt/render/project/src/start'` で起動に失敗する。
-`npm start` でも動くが、先頭に `node ` が残っていても気づきにくいため、
-`node server.js` と書くほうが確実。
+
+この取り違えが起きても展示が止まらないよう、リポジトリ直下に `start.js` を
+置いてある(中身は `require('./server.js')` の1行)。`node start` でも
+`node start.js` でも起動する。ただし**保険であって正解ではない**ので、
+Start Command 自体は `node server.js` に直しておくこと。
+
+Nodeの版は `package.json` の `engines` で `22.x` に固定している。開けておくと
+Renderが最新版(26系など)を選び、動作確認していない環境で動くことになる。
 
 同じ内容を `render.yaml` にも置いてあるので、New > Blueprint から
 読み込ませれば手入力せずに済む。
