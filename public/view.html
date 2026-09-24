@@ -27,7 +27,11 @@
     width: 100%;
     flex: 1;
     display: grid;
-    gap: 1.2vw;
+    gap: 0.7vw;
+    /* 区画は写真と同じ形・同じ大きさにする(applyGrid)。
+       余った分は上下左右に均等に残す */
+    justify-content: center;
+    align-content: center;
   }
   /* 待機画面は背景の演出だけを見せる(結果の区画も出さない) */
   .slots.is-waiting { display: none; }
@@ -63,8 +67,8 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    padding: 8px 16px 10px 14px;
-    border-radius: 16px 0 16px 0;
+    padding: 5px 13px 7px 11px;
+    border-radius: 16px 0 14px 0;
     background: rgba(18, 21, 26, 0.72);
     line-height: 1.1;
   }
@@ -111,8 +115,8 @@
     right: 0;
     bottom: 0;
     z-index: 1;
-    padding: 6px 14px 8px 16px;
-    border-radius: 16px 0 16px 0;
+    padding: 4px 11px 6px 13px;
+    border-radius: 14px 0 16px 0;
     background: rgba(18, 21, 26, 0.72);
     color: #ffffff;
     font-size: clamp(15px, 1.5vw, 22px);
@@ -210,10 +214,10 @@
     /* 背景の絵で煙が広がっている範囲。ここに写真を置く。
        寄ったときに左の見出しへかぶらないよう、左端に余裕をとってある */
     position: absolute;
-    left: 4%;
-    top: 12%;
-    width: 92%;
-    height: 76%;
+    left: 2%;
+    top: 9%;
+    width: 96%;
+    height: 84%;
     flex: none;
     gap: 14px;
     transition: opacity 0.9s ease;
@@ -237,9 +241,9 @@
   /* 見出しは結果の上に1行で置く。面積は結果に回す */
   body.is-tamatebako .booth-header {
     position: absolute;
-    left: 4%;
-    top: 1.5%;
-    right: 4%;
+    left: 2%;
+    top: 1%;
+    right: 2%;
     display: flex;
     align-items: baseline;
     gap: 16px;
@@ -304,20 +308,72 @@
   // 展示では1枚だけを大きく見せる。
   const DISPLAY_AGE = 70;
 
+  // 結果画像の縦横比。撮影ブースが送るのはカメラのフレームなので横長で
+  // 返る。実際の画像が届いたらその値に直す(下の adoptPhotoAspect)。
+  let photoAspect = 16 / 9;
+
   let slotCount = 0;
   let lastUpdatedAt = null;
   let lastMode = null;
   let rendered = false;
 
   /**
-   * 人数に応じて画面をなるべく正方形に近い区画へ分割する。
+   * 人数に応じて画面を区切る。
+   *
+   * 正方形に近い分割(√n)ではなく、写真がいちばん大きく収まる列数を選ぶ。
+   * 結果は横長なので、区画が正方形に近いほど上下が余ってしまう。
+   * 何列がよいかは画面の形で変わる(6人ならiPadは2列、MacBookは3列)ため、
+   * 表示のたびと画面の大きさが変わったときに計算し直す。
    */
   function applyGrid(count) {
-    if (slotCount === count) return;
     slotCount = count;
-    const cols = Math.ceil(Math.sqrt(count));
-    slotsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    slotsEl.style.gridTemplateRows = `repeat(${Math.ceil(count / cols)}, 1fr)`;
+    const rect = slotsEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const gap = parseFloat(getComputedStyle(slotsEl).columnGap) || 0;
+    const cols = bestColumnCount(count, rect.width, rect.height, gap);
+    const rows = Math.ceil(count / cols);
+
+    // 区画を写真と同じ形にして、白い帯が出ないようにする
+    const cellWidth = (rect.width - gap * (cols - 1)) / cols;
+    const cellHeight = (rect.height - gap * (rows - 1)) / rows;
+    const width = Math.max(1, Math.min(cellWidth, cellHeight * photoAspect));
+    const height = width / photoAspect;
+
+    slotsEl.style.gridTemplateColumns = `repeat(${cols}, ${width}px)`;
+    slotsEl.style.gridTemplateRows = `repeat(${rows}, ${height}px)`;
+  }
+
+  /**
+   * 実際に届いた画像の縦横比を、列数の計算に取り込む。
+   * 目安と大きく違ったときだけ並べ直す(毎回やると無駄に組み直すため)。
+   * @param {number} aspect
+   */
+  function adoptPhotoAspect(aspect) {
+    if (!aspect || Math.abs(aspect - photoAspect) / photoAspect < 0.05) return;
+    photoAspect = aspect;
+    if (slotCount > 0) applyGrid(slotCount);
+  }
+
+  /**
+   * 区画に収まる写真がいちばん大きくなる列数を求める。
+   * @param {number} count - 並べる人数
+   * @param {number} width,height - 並べる領域の大きさ
+   * @param {number} gap - 区画のすき間
+   */
+  function bestColumnCount(count, width, height, gap) {
+    let best = { cols: Math.ceil(Math.sqrt(count)), area: 0 };
+    for (let cols = 1; cols <= count; cols++) {
+      const rows = Math.ceil(count / cols);
+      const cellWidth = (width - gap * (cols - 1)) / cols;
+      const cellHeight = (height - gap * (rows - 1)) / rows;
+      if (cellWidth <= 0 || cellHeight <= 0) continue;
+      // 区画に横長の写真を収めたときの大きさ
+      const photoWidth = Math.min(cellWidth, cellHeight * photoAspect);
+      const area = photoWidth * (photoWidth / photoAspect);
+      if (area > best.area) best = { cols, area };
+    }
+    return best.cols;
   }
 
   function buildSlot(entry) {
@@ -345,6 +401,10 @@
       const img = document.createElement('img');
       img.src = resolveImageUrl(output.url);
       img.alt = `${output.res_age}歳`;
+      img.addEventListener('load', () => {
+        if (!img.naturalWidth || !img.naturalHeight) return;
+        adoptPhotoAspect(img.naturalWidth / img.naturalHeight);
+      });
       img.addEventListener('error', () => {
         logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${output.res_age}歳の画像を表示できません` });
       });
@@ -525,7 +585,13 @@
     activeScene().resize(window.innerWidth, window.innerHeight);
   }
 
-  window.addEventListener('resize', resizeOcean);
+  window.addEventListener('resize', () => {
+    resizeOcean();
+    // 画面の形が変われば最適な列数も変わる
+    if (slotCount > 0 && !slotsEl.classList.contains('is-waiting')) {
+      applyGrid(slotCount);
+    }
+  });
   resizeOcean();
   activeScene().start();
 
