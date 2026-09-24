@@ -1,7 +1,7 @@
 /*
  * 玉手箱の演出。閲覧ブース(view.html)の絵柄 `tamatebako` で使う。
  *
- * 背景の絵(backgrounds/aging_viewBackground.webp)は浜辺に開いた玉手箱と、
+ * 背景の絵(backgrounds/aging_viewBackground.jpg)は浜辺に開いた玉手箱と、
  * そこから右上へ立ちのぼる煙で構成されている。この煙の部分に加工後の写真を
  * 並べ、係員が表示を入れ替えるたびに「玉手箱を開けて煙が晴れる」流れを
  * canvasの煙で再現する。
@@ -54,10 +54,37 @@
     'rgba(222, 216, 243, 0.86)'
   ];
 
-  // 玉手箱の位置(画面に対する割合)。背景の絵の玉手箱とほぼ重なる。
-  // 背景の敷き方(view.html の #backdrop の background-position)を変えたら
-  // ここも合わせること。
-  const BOX = { x: 0.10, y: 0.86 };
+  /*
+   * 玉手箱の位置は、背景の絵の中での位置から毎回計算する。
+   * 背景は cover で敷くため、画面の縦横比によって絵のどこが切り取られるかが
+   * 変わる。画面に対する割合で固定すると、別の縦横比のディスプレイでは
+   * 煙の出どころが絵の玉手箱からずれてしまう。
+   *
+   * BACKDROP は背景画像(aging_viewBackground.jpg)の元の寸法、
+   * BOX_IN_IMAGE はその絵の中での玉手箱の位置と横幅(いずれも割合)。
+   * 背景画像を差し替えたらこの2つを合わせること。
+   * view.html 側が background-position: center であることが前提。
+   */
+  const BACKDROP = { width: 1195, height: 896 };
+  const BOX_IN_IMAGE = { x: 0.165, y: 0.80, halfWidth: 0.115 };
+
+  /**
+   * coverで敷いた背景の上で、玉手箱が画面のどこに来るかを求める。
+   * @param {number} width - canvasの幅
+   * @param {number} height - canvasの高さ
+   */
+  function resolveBoxPosition(width, height) {
+    const scale = Math.max(width / BACKDROP.width, height / BACKDROP.height);
+    const drawnWidth = BACKDROP.width * scale;
+    const drawnHeight = BACKDROP.height * scale;
+    const left = (width - drawnWidth) / 2;
+    const top = (height - drawnHeight) / 2;
+    return {
+      x: left + drawnWidth * BOX_IN_IMAGE.x,
+      y: top + drawnHeight * BOX_IN_IMAGE.y,
+      size: drawnWidth * BOX_IN_IMAGE.halfWidth
+    };
+  }
 
   const clamp01 = (v) => Math.min(1, Math.max(0, v));
   // 立ち上がりと終わりをなめらかにする
@@ -73,6 +100,8 @@
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const onPhase = options.onPhase || (() => {});
 
+    // 画面上での玉手箱の位置と大きさ。resizeのたびに計算し直す
+    let box = { x: 0, y: 0, size: 0 };
     let puffs = [];
     let running = false;
     let playStartMs = 0;      // 0なら演出中ではない
@@ -88,6 +117,7 @@
     function resize(width, height) {
       canvas.width = Math.max(1, Math.round(width));
       canvas.height = Math.max(1, Math.round(height));
+      box = resolveBoxPosition(canvas.width, canvas.height);
 
       const { width: w, height: h } = canvas;
       const unit = Math.max(w, h);
@@ -151,38 +181,43 @@
      */
     function drawLid(opacity) {
       if (opacity <= 0.01) return;
-      const { width: w, height: h } = canvas;
-      const s = Math.max(w, h) * 0.075;
-      const x = w * BOX.x;
-      const y = h * BOX.y;
+      const s = box.size;
+      const x = box.x;
+      const y = box.y;
 
       ctx.save();
       ctx.globalAlpha = opacity;
       ctx.translate(x, y);
-      ctx.rotate(-0.1);
+      // 絵の中の箱がわずかに傾いているのに合わせる
+      ctx.rotate(-0.06);
 
       // 箱に載っているように見せるための落ち影
-      ctx.filter = 'blur(10px)';
-      ctx.fillStyle = 'rgba(58, 38, 20, 0.45)';
+      ctx.filter = 'blur(8px)';
+      ctx.fillStyle = 'rgba(26, 18, 10, 0.5)';
       ctx.beginPath();
-      ctx.ellipse(0, s * 0.3, s * 0.98, s * 0.2, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, s * 0.22, s * 0.95, s * 0.16, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // ふたの板。水彩の絵に馴染むよう輪郭はぼかす
-      ctx.filter = 'blur(2.5px)';
-      ctx.fillStyle = '#7a4f28';
+      // ふたの板。絵の玉手箱と同じ黒漆の色で、輪郭はぼかして馴染ませる
+      ctx.filter = 'blur(2px)';
+      ctx.fillStyle = '#1d1712';
       ctx.beginPath();
-      ctx.roundRect(-s * 0.92, -s * 0.3, s * 1.84, s * 0.56, s * 0.12);
+      ctx.roundRect(-s, -s * 0.24, s * 2, s * 0.42, s * 0.06);
       ctx.fill();
 
-      // 上面の明るい面と、金の帯
-      ctx.fillStyle = '#9a6b38';
+      // 上面のわずかな照り
+      ctx.fillStyle = '#332a20';
       ctx.beginPath();
-      ctx.roundRect(-s * 0.86, -s * 0.26, s * 1.72, s * 0.26, s * 0.1);
+      ctx.roundRect(-s * 0.95, -s * 0.2, s * 1.9, s * 0.16, s * 0.05);
       ctx.fill();
-      ctx.fillStyle = '#d4a94e';
+
+      // 金の蒔絵に見立てた帯と留め具
+      ctx.fillStyle = '#b9922f';
       ctx.beginPath();
-      ctx.roundRect(-s * 0.92, -s * 0.04, s * 1.84, s * 0.11, s * 0.05);
+      ctx.roundRect(-s, s * 0.02, s * 2, s * 0.07, s * 0.03);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.roundRect(-s * 0.16, -s * 0.2, s * 0.32, s * 0.3, s * 0.04);
       ctx.fill();
 
       ctx.restore();
@@ -196,8 +231,8 @@
     function drawGlow(strength, time) {
       if (strength <= 0.01) return;
       const { width: w, height: h } = canvas;
-      const x = w * BOX.x;
-      const y = h * BOX.y;
+      const x = box.x;
+      const y = box.y;
       const r = Math.max(w, h) * (0.06 + 0.1 * strength);
       const flicker = 0.9 + Math.sin(time * 5) * 0.1;
 
@@ -312,8 +347,8 @@
       }
 
       const { spread, alpha, lid, glow } = smokeShape(name, progress);
-      const boxX = w * BOX.x;
-      const boxY = h * BOX.y;
+      const boxX = box.x;
+      const boxY = box.y;
 
       // 光とふたは煙の下に置く(煙が広がるほど隠れていく)
       drawGlow(glow, time);
