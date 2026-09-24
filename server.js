@@ -233,7 +233,7 @@ let displayBatch = [];
 let displayUpdatedAtMs = null;
 
 // 閲覧ブースの待機演出の絵柄。係員画面から切り替える(仮運用)
-const DISPLAY_THEMES = ['realistic', 'storybook'];
+const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook'];
 let displayTheme = 'realistic';
 
 // ---- 処理履歴 ----
