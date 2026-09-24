@@ -13,7 +13,10 @@
   "license": "ISC",
   "author": "",
   "type": "commonjs",
-  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "serve:web": "npx --yes serve public -l 3000",
