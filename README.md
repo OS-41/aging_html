@@ -170,12 +170,17 @@ Renderのダッシュボードで設定する環境変数:
 | --- | --- |
 | Root Directory | 空欄(リポジトリのルート) |
 | Build Command | `npm install` |
-| Start Command | `npm start` |
+| Start Command | `node server.js` |
 | Health Check Path | `/healthz` |
 
-Start Commandは `npm start` であって `node run start` ではない。
-`node run start` は「run というファイルを実行しろ」という意味になり、
-`Cannot find module '/opt/render/project/src/run'` で起動に失敗する。
+**Start Commandは入力欄を一度すべて消してから打つこと。** Renderの入力欄には
+`node index.js` のような既定値が入っていることがあり、後半だけを書き換えると
+`node start` や `node run start` という命令になる。どちらも「start / run という
+ファイルをNodeで実行しろ」という意味で、
+`Cannot find module '/opt/render/project/src/start'` で起動に失敗する。
+`npm start` でも動くが、先頭に `node ` が残っていても気づきにくいため、
+`node server.js` と書くほうが確実。
+
 同じ内容を `render.yaml` にも置いてあるので、New > Blueprint から
 読み込ませれば手入力せずに済む。
 

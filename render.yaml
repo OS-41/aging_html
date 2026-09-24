@@ -3,8 +3,14 @@
 # 読み込ませると、起動コマンドの打ち間違いを防げる。
 #
 # すでに手でWeb Serviceを作ってある場合は、Settings > Build & Deploy の
-# Start Command を下の startCommand と同じ `npm start` に直すこと。
-# `node run start` は誤り(nodeに run というファイルを探させてしまう)。
+# Start Command を下の startCommand と同じにすること。
+#
+# このとき、入力欄を一度すべて消してから打ち直すこと。Renderの入力欄には
+# `node index.js` のような既定値が入っていることがあり、後半だけを
+# 書き換えると `node start` や `node run start` という命令になる。
+# どちらも「start / run というファイルをNodeで実行しろ」という意味で、
+#   Error: Cannot find module '/opt/render/project/src/start'
+# となって起動に失敗する。`node ` が前に残っていないか必ず確かめること。
 services:
   - type: web
     name: aging-demo
@@ -12,7 +18,7 @@ services:
     plan: starter        # 無料プランは15分でスリープし、aging APIからの画像取得に失敗する
     branch: main
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js   # npm start と同じ(npm経由でない分こちらが確実)
     healthCheckPath: /healthz   # 認証と公開パスの外に置いてある
     envVars:
       # 値はダッシュボードで入力する(リポジトリには置かない)
