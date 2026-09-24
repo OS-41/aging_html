@@ -44,6 +44,29 @@ aging APIが顔を認識できない場合はこの間に `status: error` にな
 この8秒を過ぎてから生成が失敗した場合は撮り直しを促せないため、係員画面の
 処理履歴に `entry:error` として残る。
 
+案内の文言は、aging APIが返すエラーコードから選ぶ。サーバーは応答から
+コードを取り出して受付に持たせ(`error_code`)、撮影ブースが
+`capture.html` の `FACE_ERROR_MESSAGES` で来場者向けの指示に読み替える。
+
+| コード | 画面に出す案内 |
+| --- | --- |
+| `error_below_min_image_size` | 写真が小さすぎます。係員をお呼びください |
+| `error_face_position_invalid` | お顔全体がまっすぐ中央に写るようにしてください |
+| `error_face_position_too_small` | もう少しカメラに近づいてください |
+| `error_face_position_out_of_boundary` | お顔が画面からはみ出しています。少し下がってください |
+| `error_face_not_forward_facing` | カメラをまっすぐ見てください |
+| `error_face_angle_upward` | 上を向きすぎています。少しあごを引いてください |
+| `error_face_angle_downward` | 下を向きすぎています。少しあごを上げてください |
+| `error_face_angle_leftward` | 顔が左を向きすぎています。少し右を向いてください |
+| `error_face_angle_rightward` | 顔が右を向きすぎています。少し左を向いてください |
+| `error_face_angle_left_tilt` | 頭が左に傾いています。少し右に傾けてください |
+| `error_face_angle_right_tilt` | 頭が右に傾いています。少し左に傾けてください |
+
+表に無いコードや、コードを取り出せなかった場合は
+「お顔全体がまっすぐ中央に写るようにしてください」を出す。
+APIがコードを増やしても画面が無言にならないようにするため。
+生のコードは係員画面の処理履歴と保管一覧に残す。
+
 ### 撮影ブースの背景合成
 
 人物だけを切り抜いて背景の上に重ねた映像を撮影する。

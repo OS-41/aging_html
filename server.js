@@ -400,6 +400,7 @@ function toPublicEntry(entry) {
     sequence: entry.sequence,
     status: entry.status,
     error: entry.error,
+    error_code: entry.errorCode,
     files,
     captured_at: new Date(entry.capturedAtMs).toISOString(),
     viewed_at: entry.viewedAtMs ? new Date(entry.viewedAtMs).toISOString() : null,
@@ -463,6 +464,21 @@ function isJpegFile(filePath) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * aging APIの応答からエラーコードと説明を取り出す。
+ * コード(error_face_angle_upward など)は撮影ブースで来場者向けの
+ * 案内に読み替えるため、説明とは別に持っておく。
+ * 応答の形が変わっても拾えるよう、data配下と直下の両方を見る。
+ * @param {object} payload
+ */
+function agingErrorFrom(payload) {
+  const data = payload?.data || {};
+  const code = typeof data.error === 'string' ? data.error
+    : (typeof payload?.error === 'string' ? payload.error : null);
+  const message = data.error_message || payload?.error_message || code || '生成に失敗しました';
+  return { code, message };
+}
+
+/**
  * aging APIにタスクを開始させ、task_idを返す。
  * @param {string} srcFileUrl - 外部から取得できる元画像のURL
  */
@@ -488,7 +504,10 @@ async function startAgingTask(srcFileUrl, sequence) {
   });
 
   if (!taskId) {
-    throw new Error(`タスクを開始できませんでした (${res.status})`);
+    const { code, message } = agingErrorFrom(payload);
+    const err = new Error(`タスクを開始できませんでした (${res.status}): ${message}`);
+    err.code = code;
+    throw err;
   }
   return taskId;
 }
@@ -511,10 +530,13 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
       return payload.data.results;
     }
     if (taskStatus === 'error') {
-      const detail = payload?.data?.error_message || payload?.data?.error || '生成に失敗しました';
+      const { code, message } = agingErrorFrom(payload);
+      const detail = code ? `${message} (${code})` : message;
       recordAgingApiCall(res.status, detail);
       addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
-      throw new Error(detail);
+      const err = new Error(detail);
+      err.code = code;
+      throw err;
     }
     if (!res.ok) {
       addLog({ level: 'warn', event: 'aging:poll', status: res.status, sequence, message: `想定外の応答 (${attempt}回目)` });
@@ -582,6 +604,7 @@ async function processEntry(entry, origin) {
   } catch (err) {
     entry.status = 'error';
     entry.error = err.message;
+    entry.errorCode = err.code || null;
     if (entry.sourceFileId) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
@@ -640,6 +663,7 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       capturedAtMs,
       status: 'processing',
       error: null,
+      errorCode: null,
       sourceFileId,
       taskId: null,
       outputs: [],

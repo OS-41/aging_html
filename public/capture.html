@@ -127,8 +127,8 @@
     </div>
 
     <div class="failure" id="failure" hidden>
-      <p class="failure-title">うまく受け付けられませんでした</p>
-      <p class="failure-reason" id="failureReason">もう一度撮影してください</p>
+      <p class="failure-title" id="failureReason">もう一度撮影してください</p>
+      <p class="failure-reason">もう一度撮影してください</p>
       <p class="failure-note">続けて失敗する場合は係員をお呼びください</p>
     </div>
 
@@ -193,6 +193,26 @@
   const AUTO_RESET_MS = 20000;
   // 失敗したときに自動で撮影へ戻すまでの時間。来場者が戸惑っても止まらないようにする
   const FAILURE_RESET_MS = 25000;
+
+  /*
+   * aging APIのエラーコードを、来場者がその場で直せる言葉に読み替える。
+   * 公式ドキュメントの説明をそのまま指示の形にしてある。
+   * ここに無いコードや、コードが取れなかった場合は汎用の案内を出す。
+   */
+  const FACE_ERROR_MESSAGES = {
+    error_below_min_image_size: '写真が小さすぎます。係員をお呼びください',
+    error_face_position_invalid: 'お顔全体がまっすぐ中央に写るようにしてください',
+    error_face_position_too_small: 'もう少しカメラに近づいてください',
+    error_face_position_out_of_boundary: 'お顔が画面からはみ出しています。少し下がってください',
+    error_face_not_forward_facing: 'カメラをまっすぐ見てください',
+    error_face_angle_upward: '上を向きすぎています。少しあごを引いてください',
+    error_face_angle_downward: '下を向きすぎています。少しあごを上げてください',
+    error_face_angle_leftward: '顔が左を向きすぎています。少し右を向いてください',
+    error_face_angle_rightward: '顔が右を向きすぎています。少し左を向いてください',
+    error_face_angle_left_tilt: '頭が左に傾いています。少し右に傾けてください',
+    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください'
+  };
+  const FACE_ERROR_FALLBACK = 'お顔全体がまっすぐ中央に写るようにしてください';
 
   // 受付を送ったあと、生成が早々に失敗しないかを見張る時間。
   // aging APIが顔を認識できない場合はここで分かるので、来場者がまだ
@@ -510,7 +530,8 @@
   /**
    * 受付を送ったあと、生成が早々に失敗しないかを短い間だけ見張る。
    * @param {string} entryId
-   * @returns {Promise<string|null>} 失敗した場合はその理由、そうでなければnull
+   * @returns {Promise<{code: string|null, detail: string}|null>}
+   *   失敗した場合はそのエラー、そうでなければnull
    */
   async function watchForEarlyFailure(entryId) {
     const until = Date.now() + CONFIRM_WINDOW_MS;
@@ -524,7 +545,7 @@
         return null;
       }
       if (entry.status === 'error') {
-        return entry.error || '写真をうまく処理できませんでした';
+        return { code: entry.error_code || null, detail: entry.error || '写真をうまく処理できませんでした' };
       }
       if (entry.status === 'ready') {
         return null;
@@ -617,23 +638,24 @@
       result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
       logEvent({ level: 'error', event: 'capture:send', message: `送信に失敗: ${err.message}` });
-      showFailure('うまく送れませんでした。もう一度撮影してください');
+      showFailure('うまく送れませんでした');
       return;
     }
 
     // 受付はできた。ここから短い間だけ、生成がすぐ失敗しないかを見張る。
     // 顔が認識できない場合はここで分かるので、まだブースにいるうちに撮り直せる。
     setWorking('お顔を確認しています');
-    const failureReasonText = await watchForEarlyFailure(result.entry_id);
+    const failed = await watchForEarlyFailure(result.entry_id);
 
-    if (failureReasonText) {
+    if (failed) {
       logEvent({
         level: 'error',
         event: 'capture:rejected',
         sequence: result.sequence,
-        message: failureReasonText
+        message: failed.detail
       });
-      showFailure('お顔をうまく認識できませんでした。もう一度撮影してください');
+      // 何を直せばよいかが分かるよう、APIのエラーコードを案内に読み替える
+      showFailure(FACE_ERROR_MESSAGES[failed.code] || FACE_ERROR_FALLBACK);
       return;
     }
 
