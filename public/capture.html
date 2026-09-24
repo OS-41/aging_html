@@ -31,6 +31,76 @@
     margin: 0;
     font-size: clamp(16px, 2.2vw, 19px);
   }
+
+  /*
+   * 送信してから受付が確定するまでのおおい。撮影した写真を薄く残したまま
+   * 上に重ね、「今この写真を処理している」ことを来場者に伝える。
+   */
+  .stage { position: relative; }
+  .working {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: rgba(16, 19, 23, 0.72);
+    border-radius: 14px;
+    backdrop-filter: blur(2px);
+  }
+  .spinner {
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    border: 7px solid rgba(255, 255, 255, 0.22);
+    border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .working-text {
+    font-size: clamp(19px, 2.6vw, 26px);
+    font-weight: 600;
+    text-align: center;
+    padding-inline: 16px;
+  }
+  .working-note {
+    font-size: clamp(14px, 1.8vw, 17px);
+    color: var(--muted);
+    text-align: center;
+    padding-inline: 16px;
+    margin: 0;
+  }
+  /* 動きを抑える設定では回さず、点滅で進行中を示す */
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; border-top-color: var(--accent); }
+    .working-text { animation: none; }
+  }
+
+  /* 送信や生成に失敗したときの案内。撮り直しへ誘導する */
+  .failure {
+    text-align: center;
+    background: var(--surface);
+    border: 2px solid var(--danger);
+    border-radius: 16px;
+    padding: 24px 28px;
+    width: 100%;
+  }
+  .failure-title {
+    font-size: clamp(22px, 3.4vw, 30px);
+    font-weight: 700;
+    color: var(--danger);
+    margin: 0 0 8px;
+  }
+  .failure-reason {
+    font-size: clamp(16px, 2.2vw, 20px);
+    margin: 0 0 6px;
+  }
+  .failure-note {
+    font-size: clamp(14px, 1.8vw, 17px);
+    color: var(--muted);
+    margin: 0;
+  }
 </style>
 </head>
 <body>
@@ -47,6 +117,19 @@
       <video id="video" autoplay playsinline muted hidden></video>
       <canvas id="preview"></canvas>
       <canvas id="canvas" hidden></canvas>
+
+      <!-- 送信中は撮影した写真の上にこれを重ねる -->
+      <div class="working" id="working" hidden>
+        <div class="spinner"></div>
+        <div class="working-text" id="workingText">写真を送っています</div>
+        <p class="working-note">そのままお待ちください</p>
+      </div>
+    </div>
+
+    <div class="failure" id="failure" hidden>
+      <p class="failure-title" id="failureReason">もう一度撮影してください</p>
+      <p class="failure-reason">もう一度撮影してください</p>
+      <p class="failure-note">続けて失敗する場合は係員をお呼びください</p>
     </div>
 
     <div class="receipt" id="receipt" hidden>
@@ -60,6 +143,7 @@
       <button type="button" id="captureBtn" class="primary" disabled>撮影する</button>
       <button type="button" id="sendBtn" class="primary" hidden>この写真を送る</button>
       <button type="button" id="retakeBtn" hidden>撮り直す</button>
+      <button type="button" id="retryBtn" class="primary" hidden>もう一度撮影する</button>
     </div>
 
     <div class="staff-bar">
@@ -95,6 +179,11 @@
   const captureBtn = document.getElementById('captureBtn');
   const sendBtn = document.getElementById('sendBtn');
   const retakeBtn = document.getElementById('retakeBtn');
+  const retryBtn = document.getElementById('retryBtn');
+  const working = document.getElementById('working');
+  const workingText = document.getElementById('workingText');
+  const failure = document.getElementById('failure');
+  const failureReason = document.getElementById('failureReason');
   const receipt = document.getElementById('receipt');
   const receiptNumber = document.getElementById('receiptNumber');
   const sentCount = document.getElementById('sentCount');
@@ -102,6 +191,37 @@
 
   // 送信後、次の来場者のために自動で初期状態へ戻すまでの時間
   const AUTO_RESET_MS = 20000;
+  // 失敗したときに自動で撮影へ戻すまでの時間。来場者が戸惑っても止まらないようにする
+  const FAILURE_RESET_MS = 25000;
+
+  /*
+   * aging APIのエラーコードを、来場者がその場で直せる言葉に読み替える。
+   * 公式ドキュメントの説明をそのまま指示の形にしてある。
+   * ここに無いコードや、コードが取れなかった場合は汎用の案内を出す。
+   */
+  const FACE_ERROR_MESSAGES = {
+    error_below_min_image_size: '写真が小さすぎます。係員をお呼びください',
+    error_face_position_invalid: 'お顔全体がまっすぐ中央に写るようにしてください',
+    error_face_position_too_small: 'もう少しカメラに近づいてください',
+    error_face_position_out_of_boundary: 'お顔が画面からはみ出しています。少し下がってください',
+    error_face_not_forward_facing: 'カメラをまっすぐ見てください',
+    error_face_angle_upward: '上を向きすぎています。少しあごを引いてください',
+    error_face_angle_downward: '下を向きすぎています。少しあごを上げてください',
+    error_face_angle_leftward: '顔が左を向きすぎています。少し右を向いてください',
+    error_face_angle_rightward: '顔が右を向きすぎています。少し左を向いてください',
+    error_face_angle_left_tilt: '頭が左に傾いています。少し右に傾けてください',
+    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください'
+  };
+  const FACE_ERROR_FALLBACK = 'お顔全体がまっすぐ中央に写るようにしてください';
+
+  // 受付を送ったあと、生成が早々に失敗しないかを見張る時間。
+  // aging APIが顔を認識できない場合はここで分かるので、来場者がまだ
+  // ブースにいるうちに撮り直してもらえる。生成そのものの完了は待たない
+  // (移動時間を生成に充てるのが2ブース構成の前提のため)。
+  // aging APIは依頼の直後から状況を返すため、顔を認識できない場合は
+  // 数秒で分かる(サーバー側の確認間隔は3秒)。取りこぼさない程度に短くする。
+  const CONFIRM_WINDOW_MS = 8000;
+  const CONFIRM_INTERVAL_MS = 1500;
 
   let stream = null;
   let capturedBlob = null;
@@ -352,19 +472,87 @@
   backgroundSelect.addEventListener('change', () => applyBackgroundMode(backgroundSelect.value));
 
   /**
+   * 処理中のおおいを出し入れする。
+   * @param {string|null} text - 表示する文言。nullで消す
+   */
+  function setWorking(text) {
+    if (text) {
+      workingText.textContent = text;
+      working.hidden = false;
+    } else {
+      working.hidden = true;
+    }
+  }
+
+  /**
+   * 撮り直しの案内を出す。来場者がまだブースにいるうちに撮り直してもらう。
+   * @param {string} reason - 何が起きたのかを来場者向けの言葉で
+   */
+  function showFailure(reason) {
+    clearTimeout(autoResetTimer);
+    capturedBlob = null;
+    setWorking(null);
+    stage.hidden = true;
+    receipt.hidden = true;
+    failure.hidden = false;
+    failureReason.textContent = reason;
+    captureBtn.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    retryBtn.hidden = false;
+    retryBtn.disabled = !stream;
+    setStatus('もう一度撮影してください', 'error');
+    // 来場者がその場を離れても、次の人のために撮影画面へ戻る
+    autoResetTimer = setTimeout(resetToCamera, FAILURE_RESET_MS);
+  }
+
+  /**
    * 撮影前の状態に戻す。次の来場者への切り替えにも使う。
    */
   function resetToCamera() {
     clearTimeout(autoResetTimer);
     capturedBlob = null;
+    setWorking(null);
     stage.hidden = false;
     showInStage('camera');
     receipt.hidden = true;
+    failure.hidden = true;
     sendBtn.hidden = true;
     retakeBtn.hidden = true;
+    retryBtn.hidden = true;
     captureBtn.hidden = false;
     captureBtn.disabled = !stream;
+    sendBtn.disabled = false;
+    retakeBtn.disabled = false;
     setStatus(stream ? '正面を向いて「撮影する」を押してください' : '「カメラを開始」を押してください');
+  }
+
+  /**
+   * 受付を送ったあと、生成が早々に失敗しないかを短い間だけ見張る。
+   * @param {string} entryId
+   * @returns {Promise<{code: string|null, detail: string}|null>}
+   *   失敗した場合はそのエラー、そうでなければnull
+   */
+  async function watchForEarlyFailure(entryId) {
+    const until = Date.now() + CONFIRM_WINDOW_MS;
+    while (Date.now() < until) {
+      await sleep(CONFIRM_INTERVAL_MS);
+      let entry;
+      try {
+        entry = await callApi(`/api/entries/${entryId}`);
+      } catch (err) {
+        // 確認の通信に失敗しただけなら受付自体は生きている。見張りを諦める
+        return null;
+      }
+      if (entry.status === 'error') {
+        return { code: entry.error_code || null, detail: entry.error || '写真をうまく処理できませんでした' };
+      }
+      if (entry.status === 'ready') {
+        return null;
+      }
+    }
+    // 時間内に失敗しなければ、あとはサーバーが移動中に仕上げる
+    return null;
   }
 
   /**
@@ -426,43 +614,62 @@
   });
 
   retakeBtn.addEventListener('click', resetToCamera);
+  retryBtn.addEventListener('click', resetToCamera);
   resetBtn.addEventListener('click', resetToCamera);
 
   sendBtn.addEventListener('click', async () => {
     if (!capturedBlob) return;
 
-    sendBtn.disabled = true;
-    retakeBtn.disabled = true;
-    setStatus('送信しています...');
+    // 送信中は操作できる要素を消し、撮影した写真の上に処理中のおおいを出す。
+    // 「押せたのか分からない」「固まった」と誤解されないようにするため。
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    captureBtn.hidden = true;
+    setWorking('写真を送っています');
+    setStatus('そのままお待ちください');
 
+    let result;
     try {
       const jpeg = await toJpegUnderSize(capturedBlob);
       const formData = new FormData();
       formData.append('file', jpeg, 'capture.jpg');
       formData.append('origin', BACKEND_ORIGIN);
 
-      const result = await callApi('/api/entries', { method: 'POST', body: formData });
-
-      sent += 1;
-      sentCount.textContent = String(sent);
-      receiptNumber.textContent = String(result.sequence);
-      // 番号が最も重要なので、写真を隠して番号だけを大きく見せる
-      stage.hidden = true;
-      receipt.hidden = false;
-      sendBtn.hidden = true;
-      retakeBtn.hidden = true;
-      captureBtn.hidden = true;
-      setStatus('受け付けました。次の場所へお進みください', 'done');
-
-      // 写真の生成はサーバーが裏で進めるため、ここで待つ必要はない
-      autoResetTimer = setTimeout(resetToCamera, AUTO_RESET_MS);
+      result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
-      console.error('[capture] send failed:', err);
-      setStatus('送信できませんでした。もう一度お試しください', 'error');
-    } finally {
-      sendBtn.disabled = false;
-      retakeBtn.disabled = false;
+      logEvent({ level: 'error', event: 'capture:send', message: `送信に失敗: ${err.message}` });
+      showFailure('うまく送れませんでした');
+      return;
     }
+
+    // 受付はできた。ここから短い間だけ、生成がすぐ失敗しないかを見張る。
+    // 顔が認識できない場合はここで分かるので、まだブースにいるうちに撮り直せる。
+    setWorking('お顔を確認しています');
+    const failed = await watchForEarlyFailure(result.entry_id);
+
+    if (failed) {
+      logEvent({
+        level: 'error',
+        event: 'capture:rejected',
+        sequence: result.sequence,
+        message: failed.detail
+      });
+      // 何を直せばよいかが分かるよう、APIのエラーコードを案内に読み替える
+      showFailure(FACE_ERROR_MESSAGES[failed.code] || FACE_ERROR_FALLBACK);
+      return;
+    }
+
+    sent += 1;
+    sentCount.textContent = String(sent);
+    receiptNumber.textContent = String(result.sequence);
+    // 番号が最も重要なので、写真を隠して番号だけを大きく見せる
+    setWorking(null);
+    stage.hidden = true;
+    receipt.hidden = false;
+    setStatus('受け付けました。次の場所へお進みください', 'done');
+
+    // 生成の続きはサーバーが移動中に進めるため、ここでは待たない
+    autoResetTimer = setTimeout(resetToCamera, AUTO_RESET_MS);
   });
 </script>
 </body>

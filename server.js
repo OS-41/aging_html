@@ -130,9 +130,24 @@ function resolvePublicOrigin(candidate) {
     return null;
   }
 
+  return isDevelopmentOrigin(candidate) ? url.origin : null;
+}
+
+/**
+ * Codespacesの転送URLか、ローカル開発用のホストか。
+ * 外部APIに渡すURLの検証と、開発時のCORS許可の両方で使う。
+ * @param {string} candidate
+ */
+function isDevelopmentOrigin(candidate) {
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return false;
+  }
   const isCodespaces = url.protocol === 'https:' && /\.app\.github\.dev$/.test(url.hostname);
   const isLocal = ['localhost', '127.0.0.1'].includes(url.hostname);
-  return isCodespaces || isLocal ? url.origin : null;
+  return isCodespaces || isLocal;
 }
 
 // ルート定義はrouterにまとめ、公開パス(BASE_PATH)配下へまとめてマウントする
@@ -140,16 +155,24 @@ const router = express.Router();
 
 app.use(express.json());
 
-// CORS設定: どのオリジン(index.htmlを配信しているCodespaceのポート)からでも
-// アクセスできるようにする。Codespaceごとにポート転送URLのサブドメインが
-// 変わる（例: iOSのCodespacesアプリから開いた場合など）ため、オリジンを
-// 固定せず "*" を許可する。認証情報(Cookie)は使わないため credentials は
-// 有効にしない。
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
-}));
+//NOTE: ここからRender公開用のCORS設定。公開時はフロントとAPIを同一オリジンで配信するためCORSそのものが不要になる
+// 本番(PUBLIC_ORIGINあり)ではCORSヘッダーを一切付けない。ブラウザの
+// 同一オリジンポリシーがそのまま効き、他所のページからAPIを叩けなくなる。
+//
+// Codespaceでの開発時(PUBLIC_ORIGINなし)だけ、フロントを3000番から
+// 配信して5000番のAPIを叩く構成になるため許可する。ただし以前の "*" は
+// やめ、Codespacesの転送URLとローカルホストに限る。
+if (!PUBLIC_ORIGIN) {
+  app.use(cors({
+    origin: (origin, callback) => {
+      // Originヘッダーが無いものはCORSの対象外(curlや同一オリジン)
+      callback(null, !origin || isDevelopmentOrigin(origin));
+    },
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
+  }));
+}
+//NOTE: ここまでRender公開用のCORS設定
 
 // アップロード先ディレクトリ（存在しなければ作成）
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -171,7 +194,7 @@ function deleteStoredFile(fileId) {
   fileStore.delete(fileId);
   fs.unlink(fileInfo.filePath, (err) => {
     if (err && err.code !== 'ENOENT') {
-      console.log(`ファイル削除に失敗しました(${fileId}): ${err.message}`);
+      addLog({ level: 'warn', event: 'file:delete', message: `アップロード画像を削除できません(${fileId}): ${err.message}` });
     }
   });
 }
@@ -277,6 +300,11 @@ const SERVER_STARTED_AT_MS = Date.now();
 
 /**
  * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
+ *
+ * サーバー側の記録はすべてここを通し、係員画面の処理履歴に出す。
+ * ただし警告と異常だけはホスティング側のログにも流す。処理履歴は
+ * メモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
+ * 係員画面自体が開けないため。
  */
 function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null }) {
   logSequence += 1;
@@ -293,6 +321,11 @@ function addLog({ source = 'server', level = 'info', event, message = '', status
   if (logStore.length > MAX_LOG_ENTRIES) {
     logStore.splice(0, logStore.length - MAX_LOG_ENTRIES);
   }
+
+  if (level === 'warn' || level === 'error') {
+    const label = sequence ? `[${event} #${sequence}]` : `[${event}]`;
+    console.error(`${label} ${message}${status ? ` (status ${status})` : ''}`);
+  }
 }
 
 function deleteEntry(entryId) {
@@ -303,7 +336,12 @@ function deleteEntry(entryId) {
   for (const output of entry.outputs) {
     fs.unlink(output.filePath, (err) => {
       if (err && err.code !== 'ENOENT') {
-        console.log(`結果画像の削除に失敗しました(${entryId}): ${err.message}`);
+        addLog({
+          level: 'warn',
+          event: 'entry:delete',
+          sequence: entry.sequence,
+          message: `結果画像を削除できません: ${err.message}`
+        });
       }
     });
   }
@@ -362,6 +400,7 @@ function toPublicEntry(entry) {
     sequence: entry.sequence,
     status: entry.status,
     error: entry.error,
+    error_code: entry.errorCode,
     files,
     captured_at: new Date(entry.capturedAtMs).toISOString(),
     viewed_at: entry.viewedAtMs ? new Date(entry.viewedAtMs).toISOString() : null,
@@ -425,6 +464,21 @@ function isJpegFile(filePath) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * aging APIの応答からエラーコードと説明を取り出す。
+ * コード(error_face_angle_upward など)は撮影ブースで来場者向けの
+ * 案内に読み替えるため、説明とは別に持っておく。
+ * 応答の形が変わっても拾えるよう、data配下と直下の両方を見る。
+ * @param {object} payload
+ */
+function agingErrorFrom(payload) {
+  const data = payload?.data || {};
+  const code = typeof data.error === 'string' ? data.error
+    : (typeof payload?.error === 'string' ? payload.error : null);
+  const message = data.error_message || payload?.error_message || code || '生成に失敗しました';
+  return { code, message };
+}
+
+/**
  * aging APIにタスクを開始させ、task_idを返す。
  * @param {string} srcFileUrl - 外部から取得できる元画像のURL
  */
@@ -450,7 +504,10 @@ async function startAgingTask(srcFileUrl, sequence) {
   });
 
   if (!taskId) {
-    throw new Error(`タスクを開始できませんでした (${res.status})`);
+    const { code, message } = agingErrorFrom(payload);
+    const err = new Error(`タスクを開始できませんでした (${res.status}): ${message}`);
+    err.code = code;
+    throw err;
   }
   return taskId;
 }
@@ -473,10 +530,13 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
       return payload.data.results;
     }
     if (taskStatus === 'error') {
-      const detail = payload?.data?.error_message || payload?.data?.error || '生成に失敗しました';
+      const { code, message } = agingErrorFrom(payload);
+      const detail = code ? `${message} (${code})` : message;
       recordAgingApiCall(res.status, detail);
       addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
-      throw new Error(detail);
+      const err = new Error(detail);
+      err.code = code;
+      throw err;
     }
     if (!res.ok) {
       addLog({ level: 'warn', event: 'aging:poll', status: res.status, sequence, message: `想定外の応答 (${attempt}回目)` });
@@ -541,16 +601,15 @@ async function processEntry(entry, origin) {
     entry.ageMax = results.age_max ?? null;
     entry.status = 'ready';
     addLog({ event: 'entry:ready', sequence: entry.sequence, message: `結果画像 ${entry.outputs.length}枚を保存` });
-    console.log(`[entry ${entry.sequence}] 生成完了 (${entry.outputs.length}枚)`);
   } catch (err) {
     entry.status = 'error';
     entry.error = err.message;
+    entry.errorCode = err.code || null;
     if (entry.sourceFileId) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
     }
     addLog({ level: 'error', event: 'entry:error', sequence: entry.sequence, message: err.message });
-    console.log(`[entry ${entry.sequence}] 生成失敗: ${err.message}`);
   }
 }
 
@@ -604,6 +663,7 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       capturedAtMs,
       status: 'processing',
       error: null,
+      errorCode: null,
       sourceFileId,
       taskId: null,
       outputs: [],
@@ -859,27 +919,28 @@ router.get('/api/entries/:entry_id/images/:index', requireBasicAuth, (req, res) 
  * レスポンス例: { "file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
  */
 router.post('/files', requireBasicAuth, (req, res) => {
-  console.log("posted.");
   upload.single('file')(req, res, (err) => {
-    console.log("upload");
     if (err) {
+      addLog({ level: 'warn', event: 'file:upload', status: 400, message: `受け取れません: ${err.message}` });
       return res.status(400).json({ error: err.message });
     }
     if (!req.file) {
+      addLog({ level: 'warn', event: 'file:upload', status: 400, message: 'ファイルが送信されていません' });
       return res.status(400).json({ error: 'ファイルが送信されていません' });
     }
 
     if (!isJpegFile(req.file.path)) {
       fs.unlinkSync(req.file.path);
+      addLog({ level: 'warn', event: 'file:upload', status: 400, message: 'JPEGとして認識できないファイル' });
       return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
     }
 
     if (fileStore.size >= MAX_STORED_FILES) {
       fs.unlinkSync(req.file.path);
+      addLog({ level: 'error', event: 'file:upload', status: 507, message: `保管上限 ${MAX_STORED_FILES} 件に達しています` });
       return res.status(507).json({ error: '保存できるファイル数の上限に達しています。しばらく待ってから再試行してください' });
     }
 
-    console.log("file confirmed.");
     const fileId = req.generatedFileId;
     const uploadedAtMs = Date.now();
 
@@ -892,6 +953,7 @@ router.post('/files', requireBasicAuth, (req, res) => {
       uploadedAt: new Date(uploadedAtMs).toISOString()
     });
 
+    addLog({ event: 'file:upload', status: 201, message: `${Math.round(req.file.size / 1024)}KB を受け付け (${fileId})` });
     res.status(201).json({ file_id: fileId });
   });
 });
@@ -956,19 +1018,18 @@ router.delete('/files/:file_id', requireBasicAuth, (req, res) => {
  */
 router.post('/api/aging/start/:file_id', requireBasicAuth, async (req, res) => {
   if (!AGING_API_KEY) {
-    console.log("AGING_API_KEY is not available. process discontinued");
+    addLog({ level: 'error', event: 'aging:start', status: 500, message: 'AGING_API_KEYが設定されていません' });
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
-  console.log("AGING_API_KEY is available.");
   const fileInfo = fileStore.get(req.params.file_id);
   if (!fileInfo) {
-    console.log("Specified file_id is not available. process discontinued");
+    addLog({ level: 'warn', event: 'aging:start', status: 404, message: `存在しないfile_id: ${req.params.file_id}` });
     return res.status(404).json({ error: '指定されたfile_idは存在しません' });
   }
-  console.log("file_id is available.\ntry api fetch");
 
   const origin = resolvePublicOrigin(req.body?.origin);
   if (!origin) {
+    addLog({ level: 'warn', event: 'aging:start', status: 400, message: `許可されていないorigin: ${req.body?.origin}` });
     return res.status(400).json({ error: '許可されていないoriginです(Codespacesの転送URLを指定してください)' });
   }
 
@@ -986,12 +1047,18 @@ router.post('/api/aging/start/:file_id', requireBasicAuth, async (req, res) => {
         src_file_url: srcFileUrl
       })
     });
-    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
-    console.log("process finished.\nreturn data");
+    recordAgingApiCall(apiRes.status, apiRes.ok ? null : payload?.error_message || null);
+    addLog({
+      level: apiRes.ok ? 'info' : 'error',
+      event: 'aging:start',
+      status: apiRes.status,
+      message: apiRes.ok ? `生成を依頼 (task_id: ${payload?.data?.task_id ?? '不明'})` : `依頼に失敗: ${payload?.error_message ?? ''}`
+    });
     res.status(apiRes.status).json(payload);
   } catch (err) {
-    console.log("Error occurred! Detail:\n"+err);
+    recordAgingApiCall(null, err.message);
+    addLog({ level: 'error', event: 'aging:start', message: `aging APIへ接続できません: ${err.message}` });
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });
@@ -1002,20 +1069,29 @@ router.post('/api/aging/start/:file_id', requireBasicAuth, async (req, res) => {
  */
 router.get('/api/aging/:taskId', requireBasicAuth, async (req, res) => {
   if (!AGING_API_KEY) {
+    addLog({ level: 'error', event: 'aging:poll', status: 500, message: 'AGING_API_KEYが設定されていません' });
     return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
   }
-  console.log("AGING_API_KEY is available.\ntry api fetch");
   try {
     const apiRes = await fetch(`${AGING_API_BASE_URL}/${req.params.taskId}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${AGING_API_KEY}` }
     });
-    console.log("fetch completed.");
     const payload = await apiRes.json().catch(() => ({}));
-    console.log("process finished.\nreturn data");
+    recordAgingApiCall(apiRes.status, apiRes.ok ? null : payload?.error_message || null);
+    // 進行確認は短い間隔で何度も来るため、異常時だけ履歴に残す
+    if (!apiRes.ok) {
+      addLog({
+        level: 'error',
+        event: 'aging:poll',
+        status: apiRes.status,
+        message: `進行確認に失敗: ${payload?.error_message ?? ''}`
+      });
+    }
     res.status(apiRes.status).json(payload);
   } catch (err) {
-    console.log("Error occurred! Detail:\n"+err);
+    recordAgingApiCall(null, err.message);
+    addLog({ level: 'error', event: 'aging:poll', message: `aging APIへ接続できません: ${err.message}` });
     res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
   }
 });
@@ -1036,5 +1112,10 @@ app.use(BASE_PATH || '/', router);
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
 // Bad Gatewayになるケースを避ける。
 app.listen(PORT, '0.0.0.0', () => {
+  // 起動の一報だけはホスティング側のログに出す。この時点では
+  // 係員画面をまだ開けないため。
   console.log(`サーバーが起動しました: http://localhost:${PORT}${BASE_PATH || ''}/`);
+  // 処理履歴の先頭にも残す。再起動すると受付中の写真と結果が消えるため、
+  // 係員が「なぜ番号が出てこないのか」を追えるようにしておく。
+  addLog({ event: 'server:start', message: `サーバーを起動しました(保管中の受付と結果は初期化されています)` });
 });

@@ -22,10 +22,12 @@
   .slot {
     background: var(--surface);
     border-radius: 16px;
-    padding: 16px 18px;
+    padding: 14px 16px;
     display: flex;
-    flex-direction: column;
-    gap: 12px;
+    /* 写真は縦長なので、番号を横に置いて高さを写真に回す */
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
     min-height: 0;
   }
   .slot.is-empty {
@@ -38,8 +40,10 @@
 
   .slot-number {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    line-height: 1.2;
   }
   .slot-number .num {
     font-size: clamp(30px, 4vw, 44px);
@@ -57,7 +61,9 @@
     flex: 1;
     display: flex;
     gap: 10px;
-    min-height: 0;
+    min-width: 0;
+    height: 100%;
+    justify-content: center;
   }
   .photo {
     flex: 1;
@@ -65,14 +71,19 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    align-items: center;
+    justify-content: center;
   }
+  /*
+   * 受け取った画像は引き伸ばさない。scale-down は「枠に収まるならそのまま、
+   * はみ出すときだけ縮める」ため、小さい画像を拡大してぼかすことがない。
+   */
   .photo img {
     width: 100%;
     flex: 1;
     min-height: 0;
-    object-fit: cover;
+    object-fit: scale-down;
     border-radius: 10px;
-    background: #000;
   }
   .photo .age {
     text-align: center;
@@ -169,18 +180,15 @@
        寄ったときに左の見出しへかぶらないよう、左端に余裕をとってある */
     position: absolute;
     left: 28%;
-    top: 10%;
-    width: 66%;
-    height: 58%;
+    top: 8%;
+    width: 68%;
+    height: 72%;
     flex: none;
     gap: 14px;
-    transform-origin: center center;
-    transition: transform 1.6s cubic-bezier(0.33, 0, 0.2, 1), opacity 0.6s ease;
+    transition: opacity 0.9s ease;
   }
   /* 煙に覆われている間は写真を隠し、その隙に中身を入れ替える */
   body.is-tamatebako .slots.is-veiled { opacity: 0; transition: none; }
-  /* 少し待ってから写真へ寄る */
-  body.is-tamatebako .slots.is-zoomed { transform: scale(1.18); }
   body.is-tamatebako .slot {
     background: rgba(255, 255, 255, 0.5);
     border-radius: 20px;
@@ -212,18 +220,21 @@
     white-space: nowrap;
   }
   body.is-tamatebako .booth-header .subtitle { font-size: clamp(12px, 1.1vw, 15px); }
+  /* 煙が出ている間は画面が白く飛ぶため、影を濃いめにして読めるようにする */
   body.is-tamatebako .booth-header h1,
   body.is-tamatebako .booth-header .subtitle {
-    color: #f6f1ff;
-    text-shadow: 0 2px 10px rgba(70, 60, 100, 0.75);
+    color: #ffffff;
+    text-shadow: 0 2px 4px rgba(58, 48, 82, 0.9), 0 0 18px rgba(58, 48, 82, 0.75);
   }
   body.is-tamatebako .staff-bar {
-    color: #f0eaff;
-    text-shadow: 0 2px 8px rgba(70, 60, 100, 0.8);
+    color: #ffffff;
+    text-shadow: 0 2px 4px rgba(58, 48, 82, 0.9), 0 0 14px rgba(58, 48, 82, 0.7);
   }
   @media (prefers-reduced-motion: reduce) {
     body.is-tamatebako .slots { transition: none; }
   }
+  /* 煙の中で読めるよう、区画の地を少し濃くする */
+  body.is-tamatebako .slot { background: rgba(255, 255, 255, 0.62); }
 </style>
 </head>
 <body>
@@ -254,6 +265,10 @@
 
   // 表示内容が入れ替わっていないか確認する間隔
   const POLL_MS = 3000;
+
+  // 閲覧ブースで見せる年齢。aging APIは複数の年齢を返すが、
+  // 展示では1枚だけを大きく見せる。
+  const DISPLAY_AGE = 70;
 
   let slotCount = 0;
   let lastUpdatedAt = null;
@@ -288,33 +303,40 @@
     const photos = document.createElement('div');
     photos.className = 'photos';
 
-    entry.outputs.forEach((output, index) => {
+    const output = pickOutput(entry);
+    if (output) {
       const photo = document.createElement('div');
-      photo.className = 'photo' + (index === entry.age_idx ? ' is-current' : '');
+      photo.className = 'photo';
 
       const img = document.createElement('img');
       img.src = resolveImageUrl(output.url);
       img.alt = `${output.res_age}歳`;
       img.addEventListener('error', () => {
-        logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${index}枚目を表示できません` });
+        logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${output.res_age}歳の画像を表示できません` });
       });
 
       const age = document.createElement('div');
       age.className = 'age';
       age.textContent = `${output.res_age}歳`;
-      if (index === entry.age_idx) {
-        const now = document.createElement('span');
-        now.className = 'now';
-        now.textContent = 'いまのあなた';
-        age.appendChild(now);
-      }
 
       photo.append(img, age);
       photos.append(photo);
-    });
+    }
 
     slot.append(header, photos);
     return slot;
+  }
+
+  /**
+   * 表示する1枚を選ぶ。DISPLAY_AGE と同じものを使い、
+   * 無ければ最も近い年齢で代える(APIが返す年齢は依頼内容で変わるため)。
+   * @param {object} entry
+   */
+  function pickOutput(entry) {
+    if (entry.outputs.length === 0) return null;
+    return entry.outputs.reduce((best, output) =>
+      Math.abs(output.res_age - DISPLAY_AGE) < Math.abs(best.res_age - DISPLAY_AGE) ? output : best
+    );
   }
 
   function buildEmptySlot() {
@@ -371,6 +393,10 @@
         if (!first && currentTheme === 'tamatebako' && display.mode === 'results') {
           playReveal(display);
         } else {
+          if (currentTheme === 'tamatebako' && display.mode !== 'results') {
+            // 煙を消してふたを閉じ、待機中の姿に戻す
+            tamatebakoScene.close();
+          }
           render(display);
         }
         logEvent({
@@ -418,7 +444,7 @@
     document.body.classList.toggle('is-light', theme === 'picturebook');
     document.body.classList.toggle('is-tamatebako', theme === 'tamatebako');
     // 絵柄をまたぐと区画の置き場所が変わるため、演出の途中の状態は畳んでおく
-    slotsEl.classList.remove('is-veiled', 'is-zoomed');
+    slotsEl.classList.remove('is-veiled');
 
     if (theme !== 'tamatebako') {
       oceanScene.setTheme(theme);
@@ -434,28 +460,31 @@
    */
   function playReveal(display) {
     pendingDisplay = display;
-    // 煙が立ちのぼっている間は区画を見せない
+    // ふたが消えて煙が立ちのぼっている間は区画を見せない
     slotsEl.classList.add('is-veiled');
-    slotsEl.classList.remove('is-zoomed');
     tamatebakoScene.play();
   }
 
   /**
    * tamatebako-scene.js から演出の各段階を受け取る。
+   *
+   * 差し替えを veiled だけに任せると、描画が飛んだときに写真が出ないまま
+   * 演出が終わってしまう。veiled 以降はどの段階を受け取っても差し替える。
    */
   function onRevealPhase(phase) {
-    if (phase === 'veiled') {
-      // 完全に覆われている間に差し替える
+    const beforeVeil = phase === 'lifting' || phase === 'rising' || phase === 'filling';
+
+    if (beforeVeil) {
       slotsEl.classList.add('is-veiled');
-      if (pendingDisplay) {
-        render(pendingDisplay);
-        pendingDisplay = null;
-      }
-    } else if (phase === 'clearing') {
-      slotsEl.classList.remove('is-veiled');
-    } else if (phase === 'zooming') {
-      slotsEl.classList.add('is-zoomed');
+      return;
     }
+
+    if (pendingDisplay) {
+      render(pendingDisplay);
+      pendingDisplay = null;
+    }
+    // 完全に覆われている間だけ隠し、薄れ始めたら見せる
+    slotsEl.classList.toggle('is-veiled', phase === 'veiled');
   }
 
   function resizeOcean() {
