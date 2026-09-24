@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>閲覧ブース</title>
+<link rel="stylesheet" href="booth.css">
+<style>
+  /*
+   * 職員が数人分をまとめて入れ替える前提の画面。
+   * 1画面を人数分に区切り、各区画に番号と結果画像を並べる。
+   */
+  .slots {
+    width: 100%;
+    flex: 1;
+    display: grid;
+    gap: 16px;
+  }
+
+  .slot {
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+  }
+  .slot.is-empty {
+    border: 2px dashed var(--line);
+    background: transparent;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+  }
+
+  .slot-number {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .slot-number .num {
+    font-size: clamp(30px, 4vw, 44px);
+    font-weight: 700;
+    line-height: 1;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .slot-number .label {
+    font-size: 15px;
+    color: var(--muted);
+  }
+
+  .photos {
+    flex: 1;
+    display: flex;
+    gap: 10px;
+    min-height: 0;
+  }
+  .photo {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .photo img {
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    object-fit: cover;
+    border-radius: 10px;
+    background: #000;
+  }
+  .photo .age {
+    text-align: center;
+    font-size: clamp(15px, 1.6vw, 19px);
+    font-weight: 600;
+  }
+  .photo.is-current .age { color: var(--accent); }
+  .photo .now {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+  }
+
+  /* 待機中に流す海中の演出。結果を出しているときは控えめにする */
+  #ocean {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    width: 100%;
+    height: 100%;
+    transition: opacity 1.2s ease;
+  }
+  #ocean.is-dimmed { opacity: 0.35; }
+  @media (prefers-reduced-motion: reduce) {
+    #ocean { transition: none; }
+  }
+
+  /* 絵柄によって背景の明るさが変わるため、見出しに影を付けて読めるようにする */
+  .booth-header h1,
+  .booth-header .subtitle,
+  .staff-bar {
+    text-shadow: 0 2px 8px rgba(2, 20, 31, 0.85);
+  }
+
+  /* 演出が見えるよう、待機中の区画は半透明にする */
+  .slot { background: rgba(31, 36, 42, 0.86); }
+  .slot.is-empty {
+    background: rgba(21, 24, 28, 0.35);
+    backdrop-filter: blur(2px);
+  }
+  body { background: #04141f; }
+
+  /* 明るい絵柄のときは、白い紙の上に置いたような配色にする */
+  body.is-light { background: #eef8fd; }
+  body.is-light .booth-header h1,
+  body.is-light .booth-header .subtitle,
+  body.is-light .staff-bar {
+    color: #2a5468;
+    text-shadow: 0 1px 6px rgba(255, 255, 255, 0.9);
+  }
+  body.is-light .slot {
+    background: rgba(255, 255, 255, 0.88);
+    color: #2a5468;
+  }
+  body.is-light .slot.is-empty {
+    background: rgba(255, 255, 255, 0.5);
+    border-color: rgba(120, 180, 210, 0.7);
+    color: #5b8ba3;
+  }
+  body.is-light .slot-number .label,
+  body.is-light .staff-bar { color: #5b8ba3; }
+  body.is-light .photo .age { color: #2a5468; }
+</style>
+</head>
+<body>
+  <canvas id="ocean"></canvas>
+  <div class="booth">
+    <div class="booth-header">
+      <h1>未来のあなた</h1>
+      <p class="subtitle" id="subtitle">画面の番号をお探しください</p>
+    </div>
+
+    <div class="slots" id="slots"></div>
+
+    <div class="staff-bar">
+      <span>閲覧ブース</span>
+      <span>最終更新 <span class="count" id="updatedAt">—</span></span>
+      <span>表示は係員が入れ替えます</span>
+    </div>
+  </div>
+
+<script src="common.js"></script>
+<script>
+  const slotsEl = document.getElementById('slots');
+  const subtitle = document.getElementById('subtitle');
+  const updatedAtEl = document.getElementById('updatedAt');
+
+  // 表示内容が入れ替わっていないか確認する間隔
+  const POLL_MS = 3000;
+
+  let slotCount = 0;
+  let lastUpdatedAt = null;
+  let rendered = false;
+
+  /**
+   * 人数に応じて画面をなるべく正方形に近い区画へ分割する。
+   */
+  function applyGrid(count) {
+    if (slotCount === count) return;
+    slotCount = count;
+    const cols = Math.ceil(Math.sqrt(count));
+    slotsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    slotsEl.style.gridTemplateRows = `repeat(${Math.ceil(count / cols)}, 1fr)`;
+  }
+
+  function buildSlot(entry) {
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+
+    const header = document.createElement('div');
+    header.className = 'slot-number';
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(entry.sequence);
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = '番の方';
+    header.append(num, label);
+
+    const photos = document.createElement('div');
+    photos.className = 'photos';
+
+    entry.outputs.forEach((output, index) => {
+      const photo = document.createElement('div');
+      photo.className = 'photo' + (index === entry.age_idx ? ' is-current' : '');
+
+      const img = document.createElement('img');
+      img.src = resolveImageUrl(output.url);
+      img.alt = `${output.res_age}歳`;
+      img.addEventListener('error', () => {
+        logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${index}枚目を表示できません` });
+      });
+
+      const age = document.createElement('div');
+      age.className = 'age';
+      age.textContent = `${output.res_age}歳`;
+      if (index === entry.age_idx) {
+        const now = document.createElement('span');
+        now.className = 'now';
+        now.textContent = 'いまのあなた';
+        age.appendChild(now);
+      }
+
+      photo.append(img, age);
+      photos.append(photo);
+    });
+
+    slot.append(header, photos);
+    return slot;
+  }
+
+  function buildEmptySlot() {
+    const slot = document.createElement('div');
+    slot.className = 'slot is-empty';
+    slot.textContent = '準備中';
+    return slot;
+  }
+
+  function render(display) {
+    applyGrid(display.slot_count);
+
+    const children = [];
+    for (let i = 0; i < display.slot_count; i++) {
+      const entry = display.entries[i];
+      children.push(entry ? buildSlot(entry) : buildEmptySlot());
+    }
+    slotsEl.replaceChildren(...children);
+
+    const showingResults = display.entries.length > 0;
+    subtitle.textContent = showingResults
+      ? '画面の番号をお探しください'
+      : '次のご案内までしばらくお待ちください';
+    // 待機中は海中の演出をはっきり見せ、結果を出している間は控えめにする
+    document.getElementById('ocean').classList.toggle('is-dimmed', showingResults);
+
+    updatedAtEl.textContent = display.updated_at
+      ? new Date(display.updated_at).toLocaleTimeString('ja-JP')
+      : '—';
+  }
+
+  async function poll() {
+    try {
+      const display = await callApi('/api/display');
+      // 待機演出の絵柄は表示内容とは独立に切り替わる
+      applyOceanTheme(display.theme);
+
+      // 内容が変わったときだけ描き直す(画像の再読み込みを避ける)。
+      // 初回は係員がまだ一度も更新していなくても、空きスロットを出しておく。
+      if (!rendered || display.updated_at !== lastUpdatedAt) {
+        rendered = true;
+        lastUpdatedAt = display.updated_at;
+        render(display);
+        logEvent({
+          event: 'display:rendered',
+          message: `${display.entries.length}件を表示`
+        });
+      }
+    } catch (err) {
+      subtitle.textContent = 'サーバーに接続できません。係員をお呼びください';
+    }
+  }
+
+  // ---- 待機中の海中演出 ----
+  // 気泡や光の揺らぎ、ときおり横切る水棲生物を描く。
+  // 絵柄は2種類あり、係員画面から切り替える(仮運用)。
+  // 結果を表示している間は薄くして、写真の邪魔をしない。
+
+  const ocean = document.getElementById('ocean');
+  const oceanCtx = ocean.getContext('2d');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let oceanTheme = 'realistic';
+  let bubbles = [];
+  let shafts = [];
+  let swimmers = [];
+  let weeds = [];
+  let nextSwimmerAt = 0;
+
+  function resizeOcean() {
+    ocean.width = window.innerWidth;
+    ocean.height = window.innerHeight;
+    swimmers = [];
+
+    bubbles = Array.from({ length: 48 }, () => ({
+      x: Math.random() * ocean.width,
+      y: Math.random() * ocean.height,
+      r: 2 + Math.random() * 7,
+      speed: 12 + Math.random() * 34,
+      drift: 0.4 + Math.random() * 1.2,
+      phase: Math.random() * Math.PI * 2
+    }));
+
+    shafts = Array.from({ length: 5 }, (_, i) => ({
+      x: (ocean.width / 5) * i + Math.random() * 120,
+      width: 90 + Math.random() * 150,
+      sway: 40 + Math.random() * 70,
+      speed: 0.12 + Math.random() * 0.16,
+      phase: Math.random() * Math.PI * 2
+    }));
+
+    buildPicturebookElements();
+
+    // 絵本風の海藻。根元を固定して左右に揺らす
+    weeds = Array.from({ length: 14 }, () => ({
+      x: Math.random() * ocean.width,
+      height: ocean.height * (0.1 + Math.random() * 0.16),
+      width: 14 + Math.random() * 18,
+      sway: 0.25 + Math.random() * 0.4,
+      phase: Math.random() * Math.PI * 2,
+      color: Math.random() < 0.5 ? '#3fa87a' : '#2f8f6a'
+    }));
+  }
+
+  /**
+   * 画面を横切る水棲生物を1匹加える。
+   */
+  function spawnSwimmer() {
+    const toRight = Math.random() < 0.5;
+    const size = 26 + Math.random() * 46;
+    const palette = ['#ff9a4d', '#ffd166', '#ef7d92', '#7fd1f0', '#b28bdc'];
+    swimmers.push({
+      x: toRight ? -size * 3 : ocean.width + size * 3,
+      y: ocean.height * (0.15 + Math.random() * 0.6),
+      size,
+      dir: toRight ? 1 : -1,
+      speed: (26 + Math.random() * 44) * (toRight ? 1 : -1),
+      bob: 6 + Math.random() * 14,
+      phase: Math.random() * Math.PI * 2,
+      alpha: 0.28 + Math.random() * 0.3,
+      color: palette[Math.floor(Math.random() * palette.length)]
+    });
+  }
+
+  // ---- 絵柄1: 実際の海中に近いもの ----
+
+  function drawSwimmerRealistic(swimmer, time) {
+    const y = swimmer.y + Math.sin(time * 0.8 + swimmer.phase) * swimmer.bob;
+    const s = swimmer.size;
+
+    oceanCtx.save();
+    oceanCtx.translate(swimmer.x, y);
+    oceanCtx.scale(swimmer.dir, 1);
+    oceanCtx.fillStyle = `rgba(6, 42, 64, ${swimmer.alpha})`;
+
+    oceanCtx.beginPath();
+    oceanCtx.ellipse(0, 0, s, s * 0.42, 0, 0, Math.PI * 2);
+    oceanCtx.fill();
+
+    const tail = Math.sin(time * 5 + swimmer.phase) * s * 0.18;
+    oceanCtx.beginPath();
+    oceanCtx.moveTo(-s * 0.92, 0);
+    oceanCtx.lineTo(-s * 1.5, -s * 0.34 + tail);
+    oceanCtx.lineTo(-s * 1.5, s * 0.34 + tail);
+    oceanCtx.closePath();
+    oceanCtx.fill();
+
+    oceanCtx.restore();
+  }
+
+  function drawRealistic(time, dt) {
+    const { width, height } = ocean;
+
+    const water = oceanCtx.createLinearGradient(0, 0, 0, height);
+    water.addColorStop(0, '#0d4a6e');
+    water.addColorStop(0.45, '#083b58');
+    water.addColorStop(1, '#03141f');
+    oceanCtx.fillStyle = water;
+    oceanCtx.fillRect(0, 0, width, height);
+
+    // 水面から差し込む光。左右に揺れて視界の揺らぎを作る
+    for (const shaft of shafts) {
+      const sway = Math.sin(time * shaft.speed + shaft.phase) * shaft.sway;
+      const gradient = oceanCtx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, 'rgba(173, 226, 255, 0.20)');
+      gradient.addColorStop(1, 'rgba(173, 226, 255, 0)');
+      oceanCtx.fillStyle = gradient;
+      oceanCtx.beginPath();
+      oceanCtx.moveTo(shaft.x + sway, 0);
+      oceanCtx.lineTo(shaft.x + sway + shaft.width, 0);
+      oceanCtx.lineTo(shaft.x + sway * 2.4 + shaft.width * 1.7, height);
+      oceanCtx.lineTo(shaft.x + sway * 2.4 - shaft.width * 0.3, height);
+      oceanCtx.closePath();
+      oceanCtx.fill();
+    }
+
+    for (const bubble of bubbles) {
+      const x = bubble.x + Math.sin(time * bubble.drift + bubble.phase) * 14;
+      oceanCtx.beginPath();
+      oceanCtx.arc(x, bubble.y, bubble.r, 0, Math.PI * 2);
+      oceanCtx.fillStyle = 'rgba(200, 236, 255, 0.13)';
+      oceanCtx.fill();
+      oceanCtx.beginPath();
+      oceanCtx.arc(x - bubble.r * 0.3, bubble.y - bubble.r * 0.3, bubble.r * 0.32, 0, Math.PI * 2);
+      oceanCtx.fillStyle = 'rgba(255, 255, 255, 0.28)';
+      oceanCtx.fill();
+    }
+
+    for (const swimmer of swimmers) {
+      drawSwimmerRealistic(swimmer, time);
+    }
+  }
+
+  // ---- 絵柄2: 童話の絵本のようにデフォルメしたもの ----
+  // 陰影や遠近をつけず、太い輪郭線とはっきりした色面だけで描く。
+
+  const STORY_OUTLINE = '#123b52';
+
+  function outlined(drawPath, fill, lineWidth = 5) {
+    oceanCtx.beginPath();
+    drawPath();
+    oceanCtx.fillStyle = fill;
+    oceanCtx.fill();
+    oceanCtx.lineWidth = lineWidth;
+    oceanCtx.strokeStyle = STORY_OUTLINE;
+    oceanCtx.stroke();
+  }
+
+  /**
+   * 目が大きく、輪郭線の太い魚。絵本の挿絵のような見た目にする。
+   */
+  function drawSwimmerStorybook(swimmer, time) {
+    const y = swimmer.y + Math.sin(time * 1.4 + swimmer.phase) * swimmer.bob;
+    const s = swimmer.size;
+
+    oceanCtx.save();
+    oceanCtx.translate(swimmer.x, y);
+    oceanCtx.scale(swimmer.dir, 1);
+    oceanCtx.lineJoin = 'round';
+
+    // 尾びれ(大きく振る)
+    const tail = Math.sin(time * 4 + swimmer.phase) * s * 0.3;
+    outlined(() => {
+      oceanCtx.moveTo(-s * 0.7, 0);
+      oceanCtx.lineTo(-s * 1.6, -s * 0.6 + tail);
+      oceanCtx.lineTo(-s * 1.3, 0);
+      oceanCtx.lineTo(-s * 1.6, s * 0.6 + tail);
+      oceanCtx.closePath();
+    }, swimmer.color);
+
+    // 背びれ
+    outlined(() => {
+      oceanCtx.moveTo(-s * 0.2, -s * 0.5);
+      oceanCtx.quadraticCurveTo(0, -s * 1.05, s * 0.35, -s * 0.42);
+      oceanCtx.closePath();
+    }, swimmer.color);
+
+    // 胴体(丸みの強い楕円)
+    outlined(() => {
+      oceanCtx.ellipse(0, 0, s, s * 0.62, 0, 0, Math.PI * 2);
+    }, swimmer.color, 6);
+
+    // ほお
+    oceanCtx.beginPath();
+    oceanCtx.arc(s * 0.3, s * 0.2, s * 0.15, 0, Math.PI * 2);
+    oceanCtx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+    oceanCtx.fill();
+
+    // 大きな目
+    outlined(() => {
+      oceanCtx.arc(s * 0.45, -s * 0.14, s * 0.26, 0, Math.PI * 2);
+    }, '#ffffff', 4);
+    oceanCtx.beginPath();
+    oceanCtx.arc(s * 0.52, -s * 0.14, s * 0.12, 0, Math.PI * 2);
+    oceanCtx.fillStyle = STORY_OUTLINE;
+    oceanCtx.fill();
+
+    // 口
+    oceanCtx.beginPath();
+    oceanCtx.arc(s * 0.82, s * 0.12, s * 0.16, Math.PI * 0.85, Math.PI * 1.75);
+    oceanCtx.lineWidth = 4;
+    oceanCtx.strokeStyle = STORY_OUTLINE;
+    oceanCtx.stroke();
+
+    oceanCtx.restore();
+  }
+
+  function drawStorybook(time, dt) {
+    const { width, height } = ocean;
+
+    // 空気の層と海。段階を分けて塗り、グラデーションに頼らない
+    oceanCtx.fillStyle = '#8fd6ef';
+    oceanCtx.fillRect(0, 0, width, height * 0.16);
+    oceanCtx.fillStyle = '#49b3dd';
+    oceanCtx.fillRect(0, height * 0.16, width, height * 0.3);
+    oceanCtx.fillStyle = '#2f92c4';
+    oceanCtx.fillRect(0, height * 0.46, width, height * 0.54);
+
+    // うねる水面
+    const waveY = height * 0.16;
+    oceanCtx.beginPath();
+    oceanCtx.moveTo(0, waveY);
+    for (let x = 0; x <= width; x += 20) {
+      oceanCtx.lineTo(x, waveY + Math.sin(x / 90 + time * 1.1) * 12);
+    }
+    oceanCtx.lineTo(width, 0);
+    oceanCtx.lineTo(0, 0);
+    oceanCtx.closePath();
+    oceanCtx.fillStyle = '#8fd6ef';
+    oceanCtx.fill();
+    oceanCtx.lineWidth = 6;
+    oceanCtx.strokeStyle = '#ffffff';
+    oceanCtx.stroke();
+
+    // 海底の砂
+    const sandY = height * 0.82;
+    oceanCtx.beginPath();
+    oceanCtx.moveTo(0, height);
+    oceanCtx.lineTo(0, sandY);
+    for (let x = 0; x <= width; x += 60) {
+      oceanCtx.quadraticCurveTo(x + 30, sandY - 26, x + 60, sandY);
+    }
+    oceanCtx.lineTo(width, height);
+    oceanCtx.closePath();
+    oceanCtx.fillStyle = '#f5dda3';
+    oceanCtx.fill();
+    oceanCtx.lineWidth = 6;
+    oceanCtx.strokeStyle = STORY_OUTLINE;
+    oceanCtx.stroke();
+
+    // ゆらゆら揺れる海藻
+    oceanCtx.lineCap = 'round';
+    for (const weed of weeds) {
+      const lean = Math.sin(time * weed.sway + weed.phase) * 26;
+      oceanCtx.beginPath();
+      oceanCtx.moveTo(weed.x, sandY + 10);
+      oceanCtx.quadraticCurveTo(
+        weed.x + lean, sandY - weed.height * 0.6,
+        weed.x + lean * 1.6, sandY - weed.height
+      );
+      // 輪郭を先に太く描き、その上に色を重ねる
+      oceanCtx.lineWidth = weed.width + 8;
+      oceanCtx.strokeStyle = STORY_OUTLINE;
+      oceanCtx.stroke();
+      oceanCtx.lineWidth = weed.width;
+      oceanCtx.strokeStyle = weed.color;
+      oceanCtx.stroke();
+    }
+
+    // ころんとした気泡
+    for (const bubble of bubbles) {
+      const r = bubble.r * 1.9;
+      const x = bubble.x + Math.sin(time * bubble.drift + bubble.phase) * 18;
+      oceanCtx.beginPath();
+      oceanCtx.arc(x, bubble.y, r, 0, Math.PI * 2);
+      oceanCtx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+      oceanCtx.fill();
+      oceanCtx.lineWidth = 3;
+      oceanCtx.strokeStyle = '#ffffff';
+      oceanCtx.stroke();
+      oceanCtx.beginPath();
+      oceanCtx.arc(x - r * 0.32, bubble.y - r * 0.32, r * 0.2, 0, Math.PI * 2);
+      oceanCtx.fillStyle = '#ffffff';
+      oceanCtx.fill();
+    }
+
+    for (const swimmer of swimmers) {
+      drawSwimmerStorybook(swimmer, time);
+    }
+  }
+
+  // ---- 絵柄3: 水彩の絵本のような額縁 ----
+  // 中央を白く空け、縁に生き物と珊瑚を配した構図。輪郭線は使わず、
+  // にじみを重ねた淡い色面でやわらかく描く。
+  // 動かない飾り(砂・珊瑚・貝)は一度だけ別canvasに描いて使い回す。
+
+  const PB = {
+    paper: '#f4fbff',
+    wash: '#dcf0fb',
+    washDeep: '#bfe4f7',
+    whale: '#5b9fd8',
+    whaleBelly: '#e8f4fc',
+    turtle: '#6cbf72',
+    turtleShell: '#3f9159',
+    clown: '#f68a3c',
+    tang: '#f6cf4e',
+    seahorse: '#f18fb6',
+    crab: '#e8553f',
+    star: '#ef6a6a',
+    starGold: '#f6c84a',
+    coral: '#f78e5c',
+    tube: '#c07ad8',
+    kelpA: '#4fae88',
+    kelpB: '#2f8f7a',
+    kelpC: '#49b6c8',
+    kelpD: '#9182d8',
+    sand: '#f7e6bd',
+    cheek: '#f6a8b8',
+    ink: '#3d5a6c'
+  };
+
+  let pbLayer = null;
+  let pbSwimmers = [];
+  let pbKelps = [];
+
+  /**
+   * にじみを表現する。ぼかした下地の上に本体を重ねる。
+   */
+  function pbSoft(ctx, drawPath, color, alpha = 0.9, blur = 10) {
+    ctx.save();
+    ctx.filter = `blur(${blur}px)`;
+    ctx.globalAlpha = alpha * 0.55;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    drawPath(ctx);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    drawPath(ctx);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /**
+   * 目・ほお・口。どの生き物にも同じ描き方で付ける。
+   */
+  function pbFace(ctx, x, y, scale, { blush = true, smile = true } = {}) {
+    ctx.fillStyle = PB.ink;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.6 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (blush) {
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = PB.cheek;
+      ctx.beginPath();
+      ctx.arc(x + 1.2 * scale, y + 4.5 * scale, 2.4 * scale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    if (smile) {
+      ctx.strokeStyle = PB.ink;
+      ctx.lineWidth = 1.6 * scale;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(x + 3 * scale, y + 2.6 * scale, 3 * scale, 0.15 * Math.PI, 0.75 * Math.PI);
+      ctx.stroke();
+    }
+  }
+
+  function pbKelp(ctx, kelp, time) {
+    const lean = Math.sin(time * kelp.sway + kelp.phase) * kelp.amp;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      const spread = (i - 1) * kelp.width * 0.9;
+      ctx.globalAlpha = 0.75;
+      ctx.strokeStyle = kelp.color;
+      ctx.lineWidth = kelp.width * (1 - i * 0.18);
+      ctx.beginPath();
+      ctx.moveTo(kelp.x + spread, kelp.baseY);
+      ctx.quadraticCurveTo(
+        kelp.x + spread + lean * 0.6, kelp.baseY - kelp.height * 0.55,
+        kelp.x + spread + lean * 1.5, kelp.baseY - kelp.height * (0.85 + i * 0.08)
+      );
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function pbWhale(ctx, x, y, s, time) {
+    const bob = Math.sin(time * 0.7) * s * 0.08;
+    ctx.save();
+    ctx.translate(x, y + bob);
+    ctx.rotate(Math.sin(time * 0.5) * 0.05);
+
+    // 尾びれ
+    pbSoft(ctx, (c) => {
+      c.moveTo(-s * 0.85, 0);
+      c.quadraticCurveTo(-s * 1.5, -s * 0.5, -s * 1.15, -s * 0.62);
+      c.quadraticCurveTo(-s * 0.95, -s * 0.3, -s * 0.9, 0);
+      c.quadraticCurveTo(-s * 1.0, s * 0.3, -s * 1.2, s * 0.5);
+      c.quadraticCurveTo(-s * 1.4, s * 0.3, -s * 0.85, 0);
+      c.closePath();
+    }, PB.whale, 0.9, 8);
+
+    // 胴体
+    pbSoft(ctx, (c) => {
+      c.ellipse(0, 0, s, s * 0.62, 0, 0, Math.PI * 2);
+    }, PB.whale, 0.92, 12);
+
+    // おなか(下半分だけ白くする)
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.98, s * 0.6, 0, 0, Math.PI * 2);
+    ctx.clip();
+    pbSoft(ctx, (c) => {
+      c.ellipse(s * 0.1, s * 0.45, s * 0.7, s * 0.3, 0, 0, Math.PI * 2);
+    }, PB.whaleBelly, 0.9, 5);
+
+    // おなかの筋(短く控えめに)
+    ctx.strokeStyle = 'rgba(91, 159, 216, 0.35)';
+    ctx.lineWidth = s * 0.02;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(s * (0.0 + i * 0.15), s * 0.34);
+      ctx.lineTo(s * (-0.02 + i * 0.15), s * 0.54);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 背中側を少し濃くして立体感を出す
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.98, s * 0.6, 0, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#3f7fbe';
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.1, -s * 0.5, s * 0.9, s * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 胸びれ
+    pbSoft(ctx, (c) => {
+      c.ellipse(-s * 0.05, s * 0.3, s * 0.26, s * 0.12, 0.6 + Math.sin(time * 1.6) * 0.15, 0, Math.PI * 2);
+    }, PB.whale, 0.85, 5);
+
+    // 潮吹き
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#d7eefb';
+    for (let i = 0; i < 6; i++) {
+      const p = (time * 0.6 + i / 6) % 1;
+      const r = s * (0.06 + p * 0.05);
+      ctx.beginPath();
+      ctx.arc(s * 0.35 + Math.sin(i * 2.1) * s * 0.18 * p, -s * (0.55 + p * 0.7), r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    pbFace(ctx, s * 0.55, -s * 0.16, s / 24);
+    ctx.restore();
+  }
+
+  function pbTurtle(ctx, x, y, s, time) {
+    const paddle = Math.sin(time * 1.6) * 0.25;
+    ctx.save();
+    ctx.translate(x, y + Math.sin(time * 0.8) * s * 0.08);
+
+    // ひれ(甲羅の外まではっきり出す)
+    for (const [fx, fy, rot] of [[-s * 0.85, -s * 0.55, -0.7], [-s * 0.85, s * 0.55, 0.7], [s * 0.7, -s * 0.6, 0.7], [s * 0.7, s * 0.6, -0.7]]) {
+      pbSoft(ctx, (c) => {
+        c.ellipse(fx, fy, s * 0.46, s * 0.2, rot + paddle * (fy < 0 ? -1 : 1), 0, Math.PI * 2);
+      }, '#9ad17e', 0.9, 5);
+    }
+
+    // しっぽ
+    pbSoft(ctx, (c) => {
+      c.ellipse(-s * 1.05, 0, s * 0.16, s * 0.1, 0, 0, Math.PI * 2);
+    }, '#9ad17e', 0.85, 4);
+
+    // 頭
+    pbSoft(ctx, (c) => {
+      c.ellipse(s * 1.08, 0, s * 0.34, s * 0.28, 0, 0, Math.PI * 2);
+    }, '#9ad17e', 0.92, 5);
+
+    // 甲羅(ひれが見えるよう少し小さめに)
+    pbSoft(ctx, (c) => {
+      c.ellipse(0, 0, s * 0.88, s * 0.7, 0, 0, Math.PI * 2);
+    }, '#7fc97f', 0.95, 8);
+    pbSoft(ctx, (c) => {
+      c.ellipse(0, 0, s * 0.68, s * 0.54, 0, 0, Math.PI * 2);
+    }, PB.turtle, 0.9, 6);
+
+    // 甲羅の模様
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = PB.turtleShell;
+    for (const [px, py, pr] of [[0, 0, 0.2], [-s * 0.38, -s * 0.06, 0.14], [s * 0.36, -s * 0.06, 0.14], [-s * 0.16, -s * 0.34, 0.13], [s * 0.18, s * 0.32, 0.13], [-s * 0.18, s * 0.34, 0.12]]) {
+      ctx.beginPath();
+      ctx.ellipse(px, py, s * pr, s * pr * 0.85, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    pbFace(ctx, s * 1.2, -s * 0.06, s / 26);
+    ctx.restore();
+  }
+
+  function pbFish(ctx, x, y, s, dir, color, time, phase, striped) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(time * 1.5 + phase) * s * 0.25);
+    ctx.scale(dir, 1);
+
+    const tail = Math.sin(time * 4 + phase) * s * 0.25;
+    pbSoft(ctx, (c) => {
+      c.moveTo(-s * 0.7, 0);
+      c.lineTo(-s * 1.35, -s * 0.5 + tail);
+      c.lineTo(-s * 1.35, s * 0.5 + tail);
+      c.closePath();
+    }, color, 0.85, 6);
+
+    pbSoft(ctx, (c) => {
+      c.ellipse(0, 0, s, s * 0.66, 0, 0, Math.PI * 2);
+    }, color, 0.92, 8);
+
+    if (striped) {
+      // カクレクマノミの白い帯
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = '#ffffff';
+      for (const bx of [-s * 0.35, s * 0.25]) {
+        ctx.beginPath();
+        ctx.ellipse(bx, 0, s * 0.14, s * 0.62, 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    pbFace(ctx, s * 0.5, -s * 0.12, s / 18, { smile: false });
+    ctx.restore();
+  }
+
+  function pbSeahorse(ctx, x, y, s, time) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(time * 0.9) * s * 0.18);
+    ctx.rotate(Math.sin(time * 0.6) * 0.08);
+
+    pbSoft(ctx, (c) => {
+      c.moveTo(0, -s);
+      c.quadraticCurveTo(s * 0.7, -s * 0.75, s * 0.42, -s * 0.2);
+      c.quadraticCurveTo(s * 0.1, s * 0.35, s * 0.3, s * 0.75);
+      c.quadraticCurveTo(s * 0.55, s * 1.05, s * 0.05, s * 0.95);
+      c.quadraticCurveTo(-s * 0.3, s * 0.6, -s * 0.2, s * 0.1);
+      c.quadraticCurveTo(-s * 0.4, -s * 0.6, 0, -s);
+      c.closePath();
+    }, PB.seahorse, 0.9, 8);
+
+    pbFace(ctx, s * 0.18, -s * 0.62, s / 34, { smile: false });
+    ctx.restore();
+  }
+
+  function pbCrab(ctx, x, y, s, time) {
+    const step = Math.sin(time * 2.2) * s * 0.12;
+    ctx.save();
+    ctx.translate(x + step, y);
+
+    // 脚
+    ctx.strokeStyle = PB.crab;
+    ctx.lineWidth = s * 0.1;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      const ly = s * (0.1 + i * 0.22);
+      const wiggle = Math.sin(time * 4 + i) * s * 0.06;
+      for (const sign of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(sign * s * 0.6, ly - s * 0.2);
+        ctx.quadraticCurveTo(sign * s * (1 + i * 0.1), ly + wiggle, sign * s * (1.1 + i * 0.05), ly + s * 0.3);
+        ctx.stroke();
+      }
+    }
+
+    // はさみ
+    for (const sign of [-1, 1]) {
+      const claw = Math.sin(time * 3 + (sign > 0 ? 0 : 1)) * 0.2;
+      pbSoft(ctx, (c) => {
+        c.ellipse(sign * s * 1.25, -s * 0.45, s * 0.34, s * 0.26, claw * sign, 0, Math.PI * 2);
+      }, PB.crab, 0.9, 5);
+    }
+
+    // 甲羅
+    pbSoft(ctx, (c) => {
+      c.ellipse(0, 0, s, s * 0.7, 0, 0, Math.PI * 2);
+    }, PB.crab, 0.92, 8);
+
+    // 目
+    for (const sign of [-1, 1]) {
+      ctx.strokeStyle = PB.crab;
+      ctx.lineWidth = s * 0.09;
+      ctx.beginPath();
+      ctx.moveTo(sign * s * 0.3, -s * 0.5);
+      ctx.lineTo(sign * s * 0.32, -s * 0.85);
+      ctx.stroke();
+      ctx.fillStyle = PB.ink;
+      ctx.beginPath();
+      ctx.arc(sign * s * 0.32, -s * 0.92, s * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.strokeStyle = PB.ink;
+    ctx.lineWidth = s * 0.06;
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.05, s * 0.28, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  /**
+   * 動かない飾りを1枚に焼き付ける。resize時だけ描き直す。
+   */
+  function buildPicturebookLayer(width, height) {
+    const layer = document.createElement('canvas');
+    layer.width = width;
+    layer.height = height;
+    const ctx = layer.getContext('2d');
+
+    // 紙のような下地と、縁のにじみ
+    ctx.fillStyle = PB.paper;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.save();
+    ctx.filter = 'blur(60px)';
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = PB.wash;
+    ctx.fillRect(0, 0, width, height * 0.3);
+    ctx.fillRect(0, height * 0.72, width, height * 0.28);
+    ctx.fillRect(0, 0, width * 0.22, height);
+    ctx.fillRect(width * 0.78, 0, width * 0.22, height);
+    ctx.fillStyle = PB.washDeep;
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(0, 0, width * 0.1, height);
+    ctx.fillRect(width * 0.9, 0, width * 0.1, height);
+    ctx.restore();
+
+    // 中央は白く空ける
+    ctx.save();
+    ctx.filter = 'blur(45px)';
+    ctx.fillStyle = PB.paper;
+    ctx.beginPath();
+    ctx.ellipse(width / 2, height / 2, width * 0.36, height * 0.34, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 砂地
+    const sandY = height * 0.88;
+    ctx.save();
+    ctx.filter = 'blur(6px)';
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = PB.sand;
+    ctx.beginPath();
+    ctx.moveTo(0, height);
+    ctx.lineTo(0, sandY);
+    for (let x = 0; x <= width; x += 120) {
+      ctx.quadraticCurveTo(x + 60, sandY - 34, x + 120, sandY - (x % 240 === 0 ? 0 : 12));
+    }
+    ctx.lineTo(width, height);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    const s = Math.min(width, height);
+
+    // 珊瑚(左右の下)
+    const drawCoralFan = (x, y, size, color) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.85;
+      for (let i = -3; i <= 3; i++) {
+        ctx.lineWidth = size * 0.1;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x + i * size * 0.16, y - size * 0.5, x + i * size * 0.3, y - size);
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+    drawCoralFan(width * 0.86, sandY, s * 0.1, PB.coral);
+    drawCoralFan(width * 0.07, sandY, s * 0.08, PB.coral);
+
+    // 筒状の珊瑚
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    for (let i = 0; i < 4; i++) {
+      const cx = width * 0.93 + (i - 1.5) * s * 0.035;
+      const ch = s * (0.1 + (i % 2) * 0.05);
+      ctx.fillStyle = i % 2 ? PB.tube : '#d68fe8';
+      ctx.beginPath();
+      ctx.roundRect(cx - s * 0.018, sandY - ch, s * 0.036, ch, s * 0.018);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ヒトデ
+    const drawStar = (x, y, r, color) => {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
+        const a2 = a + Math.PI / 5;
+        ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        ctx.quadraticCurveTo(Math.cos(a2) * r * 0.45, Math.sin(a2) * r * 0.45, Math.cos(a2) * r * 0.42, Math.sin(a2) * r * 0.42);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
+    drawStar(width * 0.045, sandY - s * 0.02, s * 0.045, PB.star);
+    drawStar(width * 0.055, height * 0.06, s * 0.03, PB.starGold);
+
+    // 貝
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#f7b9cd';
+    ctx.beginPath();
+    ctx.arc(width * 0.13, sandY + s * 0.005, s * 0.032, Math.PI, 0);
+    ctx.fill();
+    ctx.strokeStyle = '#e88fae';
+    ctx.lineWidth = s * 0.004;
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(width * 0.13, sandY + s * 0.005);
+      ctx.lineTo(width * 0.13 + i * s * 0.012, sandY - s * 0.027);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    return layer;
+  }
+
+  /**
+   * 額縁の飾りと、縁を泳ぐ魚の配置を画面の大きさに合わせて組み立てる。
+   */
+  function buildPicturebookElements() {
+    const { width, height } = ocean;
+    const s = Math.min(width, height);
+    pbLayer = buildPicturebookLayer(width, height);
+
+    const sandY = height * 0.88;
+    pbKelps = [
+      { x: width * 0.03, baseY: sandY + 10, height: height * 0.42, width: s * 0.022, color: PB.kelpA, sway: 0.5, amp: 18, phase: 0 },
+      { x: width * 0.09, baseY: sandY + 10, height: height * 0.3, width: s * 0.018, color: PB.kelpC, sway: 0.42, amp: 22, phase: 1.2 },
+      { x: width * 0.16, baseY: sandY + 10, height: height * 0.22, width: s * 0.016, color: PB.kelpD, sway: 0.6, amp: 14, phase: 2.4 },
+      { x: width * 0.97, baseY: sandY + 10, height: height * 0.44, width: s * 0.022, color: PB.kelpB, sway: 0.46, amp: 20, phase: 0.7 },
+      { x: width * 0.91, baseY: sandY + 10, height: height * 0.3, width: s * 0.018, color: PB.kelpA, sway: 0.55, amp: 16, phase: 1.9 },
+      { x: width * 0.82, baseY: sandY + 10, height: height * 0.2, width: s * 0.015, color: PB.kelpC, sway: 0.5, amp: 18, phase: 3.1 }
+    ];
+
+    // 縁に沿ってゆっくり行き来する魚
+    pbSwimmers = [
+      { baseX: width * 0.1, y: height * 0.42, range: width * 0.05, size: s * 0.028, speed: 0.4, phase: 0, color: PB.clown, striped: true },
+      { baseX: width * 0.14, y: height * 0.55, range: width * 0.05, size: s * 0.024, speed: 0.34, phase: 2.2, color: PB.clown, striped: true },
+      { baseX: width * 0.89, y: height * 0.38, range: width * 0.05, size: s * 0.026, speed: 0.38, phase: 1.1, color: PB.tang, striped: false },
+      { baseX: width * 0.5, y: height * 0.05, range: width * 0.12, size: s * 0.02, speed: 0.3, phase: 3.4, color: '#7fc6e8', striped: false },
+      { baseX: width * 0.72, y: height * 0.95, range: width * 0.08, size: s * 0.022, speed: 0.36, phase: 0.6, color: PB.tang, striped: false }
+    ];
+  }
+
+  function drawPicturebook(time, dt) {
+    const { width, height } = ocean;
+    if (pbLayer) {
+      oceanCtx.drawImage(pbLayer, 0, 0);
+    }
+
+    // 海藻(左右)
+    for (const kelp of pbKelps) {
+      pbKelp(oceanCtx, kelp, time);
+    }
+
+    // 上をたゆたう点線(絵本の余白にある道しるべ)
+    oceanCtx.save();
+    oceanCtx.strokeStyle = '#8fc9e8';
+    oceanCtx.lineWidth = 3;
+    oceanCtx.setLineDash([10, 14]);
+    oceanCtx.lineDashOffset = -time * 24;
+    oceanCtx.beginPath();
+    oceanCtx.moveTo(width * 0.2, height * 0.1);
+    oceanCtx.bezierCurveTo(width * 0.4, height * 0.02, width * 0.6, height * 0.16, width * 0.82, height * 0.07);
+    oceanCtx.stroke();
+    oceanCtx.restore();
+
+    // 額縁に配した生き物
+    const s = Math.min(width, height);
+    pbWhale(oceanCtx, width * 0.12, height * 0.16, s * 0.11, time);
+    pbTurtle(oceanCtx, width * 0.88, height * 0.13, s * 0.075, time);
+    pbSeahorse(oceanCtx, width * 0.955, height * 0.52, s * 0.055, time);
+    pbCrab(oceanCtx, width * 0.14, height * 0.93, s * 0.05, time);
+
+    for (const fish of pbSwimmers) {
+      const x = fish.baseX + Math.sin(time * fish.speed + fish.phase) * fish.range;
+      const dir = Math.cos(time * fish.speed + fish.phase) >= 0 ? 1 : -1;
+      pbFish(oceanCtx, x, fish.y, fish.size, dir, fish.color, time, fish.phase, fish.striped);
+    }
+
+    // 気泡
+    for (const bubble of bubbles) {
+      const r = bubble.r * 1.5;
+      const x = bubble.x + Math.sin(time * bubble.drift + bubble.phase) * 16;
+      oceanCtx.beginPath();
+      oceanCtx.arc(x, bubble.y, r, 0, Math.PI * 2);
+      oceanCtx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+      oceanCtx.fill();
+      oceanCtx.lineWidth = 1.6;
+      oceanCtx.strokeStyle = 'rgba(143, 201, 232, 0.8)';
+      oceanCtx.stroke();
+    }
+  }
+
+  const oceanThemes = { realistic: drawRealistic, storybook: drawStorybook, picturebook: drawPicturebook };
+
+  let lastFrameMs = performance.now();
+
+  function drawOcean(nowMs) {
+    const dt = Math.min((nowMs - lastFrameMs) / 1000, 0.1);
+    lastFrameMs = nowMs;
+    const time = nowMs / 1000;
+    const { width, height } = ocean;
+
+    // 位置の更新は絵柄によらず共通
+    for (const bubble of bubbles) {
+      bubble.y -= bubble.speed * dt;
+      if (bubble.y < -bubble.r * 4) {
+        bubble.y = height + bubble.r * 4;
+        bubble.x = Math.random() * width;
+      }
+    }
+    if (nowMs > nextSwimmerAt) {
+      spawnSwimmer();
+      nextSwimmerAt = nowMs + 4000 + Math.random() * 9000;
+    }
+    for (const swimmer of swimmers) {
+      swimmer.x += swimmer.speed * dt;
+    }
+    swimmers = swimmers.filter((s) => s.x > -width * 0.3 && s.x < width * 1.3);
+
+    (oceanThemes[oceanTheme] || drawRealistic)(time, dt);
+
+    if (!reduceMotion) {
+      requestAnimationFrame(drawOcean);
+    }
+  }
+
+  /**
+   * 係員画面から指定された絵柄に切り替える。
+   */
+  function applyOceanTheme(theme) {
+    if (!theme || theme === oceanTheme || !oceanThemes[theme]) return;
+    oceanTheme = theme;
+    document.body.classList.toggle('is-light', theme === 'picturebook');
+    logEvent({ event: 'display:theme', message: `待機演出を ${theme} に切り替え` });
+    if (reduceMotion) {
+      drawOcean(performance.now());
+    }
+  }
+
+  window.addEventListener('resize', resizeOcean);
+  resizeOcean();
+
+  if (reduceMotion) {
+    // 動きを抑える設定のときは静止した1枚だけ描く
+    drawOcean(performance.now());
+  } else {
+    requestAnimationFrame(drawOcean);
+  }
+
+  startHeartbeat('view');
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

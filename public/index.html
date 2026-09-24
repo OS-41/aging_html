@@ -17,9 +17,16 @@
     font-size: 1.2rem;
     font-weight: 500;
   }
-  video {
+  /* カメラ映像・撮影写真・aging結果は常にこの枠の中に表示する */
+  #stage {
     width: 100%;
     max-width: 640px;
+    margin-top: 1rem;
+    display: flex;
+    justify-content: center;
+  }
+  #stage video {
+    width: 100%;
     border-radius: 8px;
     background: #000;
   }
@@ -40,53 +47,117 @@
   button:hover {
     background: #333;
   }
+  /* 撮影した写真とaging結果の描画先。カメラ映像と入れ替えて表示する */
+  #canvas {
+    max-width: 100%;
+    width: 100%;
+    border-radius: 8px;
+    display: none;
+  }
+  /* 単一表示では縦長の画像でもスライダーが画面外に出ないよう高さを抑える */
+  #canvas.single {
+    width: auto;
+    max-height: 60vh;
+  }
+  #resultControls {
+    width: 100%;
+    max-width: 640px;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+  }
+  #sliderRow {
+    width: 100%;
+    display: none;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+  #imageSlider {
+    flex: 1;
+    min-width: 0;
+  }
+  #ageLabel {
+    font-size: 0.95rem;
+    white-space: nowrap;
+  }
+  #currentMark {
+    color: #6cf;
+    font-size: 0.85rem;
+  }
 </style>
 </head>
 <body>
   <h1>Webカメラ映像</h1>
   <p id="status">カメラは停止中です</p>
-  <video id="video" autoplay playsinline></video>
-  <canvas id="canvas" style="display:none;"></canvas>
-  <canvas id="canvas2" style="max-width:640px; width:100%; border-radius:8px; display:none; margin-top:1rem;"></canvas>
-  <div>
-    <button id="startBtn">カメラを開始</button>
-    <button id="captureBtn" disabled>PNGとして保存</button>
-    <form>
-      <button type="button" id="test" disabled>test</button>
-    </form>
+
+  <!-- カメラ映像・撮影した写真・aging結果を、同じ位置で切り替えて表示する -->
+  <div id="stage">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
   </div>
-  <img id="preview" style="max-width:640px; width:100%; display:none; border-radius:8px; margin-top:1rem;">
-  <a id="downloadLink" style="display:none; margin-top:0.5rem; color:#6cf;" download>この画像をダウンロード</a>
+
+  <div id="resultControls">
+    <button type="button" id="viewModeBtn">単一表示に切り替え</button>
+    <div id="sliderRow">
+      <input type="range" id="imageSlider" min="0" max="0" step="1" value="0">
+      <span id="ageLabel"></span>
+    </div>
+  </div>
+  <div>
+    <button type="button" id="startBtn">カメラを開始</button>
+    <button type="button" id="captureBtn" disabled>撮影する</button>
+    <button type="button" id="test" disabled>年齢の変化を見る</button>
+  </div>
 
 <script>
   const video = document.getElementById('video');
   const canvas = document.getElementById('canvas');
-  const canvas2 = document.getElementById('canvas2');
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
   const captureBtn = document.getElementById('captureBtn');
-  const preview = document.getElementById('preview');
-  const downloadLink = document.getElementById('downloadLink');
   const test = document.getElementById('test');
+  const resultControls = document.getElementById('resultControls');
+  const viewModeBtn = document.getElementById('viewModeBtn');
+  const sliderRow = document.getElementById('sliderRow');
+  const imageSlider = document.getElementById('imageSlider');
+  const ageLabel = document.getElementById('ageLabel');
 
   let capturedBlob =null;
   let stream = null;
   // 直近にキャプチャしたPNG画像のURL（Blob URL）を保持する変数
   let capturedImageUrl = null;
 
+  // aging結果の表示状態
+  // agingOutput: aging APIのresults.output([{ url, res_age }, ...])
+  // agingImages: agingOutputと同じ並びで読み込み済みのImage要素
+  // uploadedIndex: agingOutput内でアップロードした画像が何番目か(results.age_idx)
+  let agingOutput = [];
+  let agingImages = [];
+  let uploadedIndex = -1;
+  let viewMode = 'grid';
+
   /**
-   * バックエンド(server.js)のオリジンを実行時に解決する。
-   * GitHub CodespacesはCodespaceごとにランダムなサブドメイン名
-   * (例: vigilant-acorn-xxxx)が割り当てられ、ポート番号だけが
-   * "-3000"/"-5000"のように末尾に付与される。この名前はCodespaceを
-   * 作り直す度（例: iOSのCodespacesアプリから開いた場合）に変わるため、
-   * バックエンドURLをハードコードすると別のCodespaceでは存在しない
-   * ホストへfetchすることになり "TypeError: Load failed" になる。
-   * そのため、現在ページを開いているオリジンから同じCodespace上の
-   * バックエンド(ポート5000)のオリジンを組み立てる。
+   * カメラ映像(video)と、撮影写真・aging結果(canvas)を同じ位置で入れ替える。
+   * @param {'camera'|'canvas'} target - 表示する側
    */
-  function resolveBackendOrigin() {
-    const { protocol, hostname, port, origin } = window.location;
+  function showInStage(target) {
+    video.style.display = target === 'camera' ? 'block' : 'none';
+    canvas.style.display = target === 'canvas' ? 'block' : 'none';
+  }
+
+  /**
+   * バックエンド(server.js)のAPIのベースURLを実行時に解決する。
+   *
+   * 1) Codespaceでの開発時: フロントは3000、バックエンドは5000と別オリジン。
+   *    Codespaceごとにサブドメイン名が変わるためURLはハードコードできず、
+   *    現在のホスト名のポート部分だけを5000に差し替えて組み立てる。
+   * 2) Render公開時: フロントとAPIを同一オリジンで配信し、さらに全体を
+   *    推測困難なパス(APP_BASE_PATH)配下に置くため、このページ自身の
+   *    ディレクトリをそのままAPIのベースURLとして使う。
+   */
+  function resolveBackendBase() {
+    const { protocol, hostname, port, origin, pathname } = window.location;
 
     // 例: vigilant-acorn-xxxx-3000.app.github.dev -> vigilant-acorn-xxxx-5000.app.github.dev
     const codespacesMatch = hostname.match(/^(.*)-\d+(\.app\.github\.dev|\.githubpreview\.dev|\.preview\.app\.github\.dev)$/);
@@ -99,18 +170,21 @@
       return `${protocol}//${hostname}:5000`;
     }
 
-    return origin;
+    // 同一オリジン配信: このページが置かれているディレクトリがAPIのベース
+    return origin + pathname.replace(/\/[^/]*$/, '');
   }
 
-  const BACKEND_ORIGIN = resolveBackendOrigin();
-  const UPLOAD_URL = BACKEND_ORIGIN + '/files';
-  console.log('[config] BACKEND_ORIGIN =', BACKEND_ORIGIN);
+  const BACKEND_BASE = resolveBackendBase();
+  // サーバーへ申告するのはオリジンのみ(公開パスはサーバー側が自分で付ける)
+  const BACKEND_ORIGIN = new URL(BACKEND_BASE, window.location.href).origin;
+  const UPLOAD_URL = BACKEND_BASE + '/files';
+  console.log('[config] BACKEND_BASE =', BACKEND_BASE);
 
   // aging APIのAPIキーはブラウザに一切渡さない。
   // server.js の /api/aging/* エンドポイントがサーバー側の.envに置いた
   // キーを使ってyce-api-01.makeupar.comへプロキシする。
-  const AGING_START_URL = BACKEND_ORIGIN + '/api/aging/start';
-  const AGING_POLL_URL = BACKEND_ORIGIN + '/api/aging';
+  const AGING_START_URL = BACKEND_BASE + '/api/aging/start';
+  const AGING_POLL_URL = BACKEND_BASE + '/api/aging';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // fileId: POST /files で取得済みのfile_id(aging対象画像はサーバーが
@@ -233,10 +307,12 @@
 
     let res;
     try {
+      // credentialsは'same-origin'(既定)にしておく。'omit'にすると
+      // 同一オリジン配信時にBasic認証の資格情報まで送られなくなり401になる。
       res = await fetch(uploadUrl, {
         method: 'POST',
         mode: 'cors',
-        credentials: 'omit',
+        credentials: 'same-origin',
         body: formData
       });
     } catch (networkErr) {
@@ -255,6 +331,25 @@
 
     const data = await res.json();
     return data.file_id; // APIのレスポンス構造に合わせて調整
+  }
+
+  /**
+   * サーバーに保存されたアップロード画像を削除する。
+   * 来場者の顔写真を必要以上に残さないため、aging処理を終えた時点で呼ぶ。
+   * (この時点でaging API側の画像取得は完了している)
+   * @param {string} fileId
+   */
+  async function deleteUploadedFile(fileId) {
+    try {
+      const res = await fetch(`${BACKEND_BASE}/files/${fileId}`, {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      console.log('[cleanup] Deleted uploaded file:', fileId, res.status);
+    } catch (e) {
+      // 削除に失敗してもサーバー側のTTLで消えるため、処理は続行する
+      console.warn('[cleanup] Failed to delete uploaded file:', fileId, e);
+    }
   }
 
   /**
@@ -284,77 +379,177 @@
   }
 
   /**
-   * aging APIのresults.output([{ url, res_age }, ...])をグリッド状に
-   * #canvas2へ描画する。各セルには結果画像と推定年齢のラベルを表示する。
-   * @param {Array<{url: string, res_age: number}>} output
+   * セルの左下に年齢ラベルを描画する。アップロードした画像には
+   * それと分かる文言を併記する。
    */
-  async function drawOutputGridToCanvas2(output) {
+  function drawAgeLabel(ctx, index, boxX, boxBottom) {
+    const resAge = agingOutput[index]?.res_age;
+    if (resAge === undefined) return;
+
+    const label = index === uploadedIndex ? `${resAge}歳 (現在のあなた)` : `${resAge}歳`;
+    ctx.font = '16px sans-serif';
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(boxX, boxBottom - 22, textWidth + 8, 22);
+    ctx.fillStyle = index === uploadedIndex ? '#6cf' : '#fff';
+    ctx.fillText(label, boxX + 4, boxBottom - 6);
+  }
+
+  /**
+   * 読み込み済みの結果画像をすべてグリッド状に#canvasへ描画する。
+   */
+  function drawGrid() {
+    const CELL_SIZE = 200;
+    const PADDING = 8;
+    const cols = Math.ceil(Math.sqrt(agingImages.length));
+    const rows = Math.ceil(agingImages.length / cols);
+
+    canvas.width = cols * CELL_SIZE + (cols + 1) * PADDING;
+    canvas.height = rows * CELL_SIZE + (rows + 1) * PADDING;
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    agingImages.forEach((img, i) => {
+      const boxX = PADDING + (i % cols) * (CELL_SIZE + PADDING);
+      const boxY = PADDING + Math.floor(i / cols) * (CELL_SIZE + PADDING);
+
+      const rect = containRect(img.naturalWidth, img.naturalHeight, boxX, boxY, CELL_SIZE, CELL_SIZE);
+      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
+      drawAgeLabel(ctx, i, boxX, boxY + CELL_SIZE);
+    });
+  }
+
+  /**
+   * 指定した1枚だけを#canvasへ描画する。
+   * @param {number} index - agingOutput内のインデックス
+   */
+  function drawSingle(index) {
+    const img = agingImages[index];
+    if (!img) return;
+
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+  }
+
+  /**
+   * スライダー横の年齢表示を更新する。
+   * アップロードした画像の場合は「現在のあなた」を併記する。
+   */
+  function updateAgeLabel(index) {
+    const resAge = agingOutput[index]?.res_age;
+    ageLabel.textContent = resAge === undefined ? '' : `${resAge}歳`;
+
+    if (index === uploadedIndex) {
+      const mark = document.createElement('span');
+      mark.id = 'currentMark';
+      mark.textContent = ' 現在のあなた';
+      ageLabel.appendChild(mark);
+    }
+  }
+
+  /**
+   * 現在の表示モード(グリッド/単一)に合わせて#canvasとコントロールを更新する。
+   */
+  function renderResults() {
+    if (viewMode === 'grid') {
+      drawGrid();
+      sliderRow.style.display = 'none';
+      viewModeBtn.textContent = '単一表示に切り替え';
+    } else {
+      const index = Number(imageSlider.value);
+      drawSingle(index);
+      updateAgeLabel(index);
+      sliderRow.style.display = 'flex';
+      viewModeBtn.textContent = 'グリッド表示に切り替え';
+    }
+    canvas.classList.toggle('single', viewMode === 'single');
+    showInStage('canvas');
+  }
+
+  /**
+   * aging結果まわりのコントロールを隠す。
+   * #canvasは撮影した写真の表示も兼ねるため、ここでは消さない
+   * (生成処理中も撮影した写真を表示したままにする)。
+   */
+  function hideResults() {
+    resultControls.style.display = 'none';
+    sliderRow.style.display = 'none';
+    canvas.classList.remove('single');
+  }
+
+  /**
+   * aging APIの結果を読み込んで表示状態を初期化する。
+   * @param {{age_idx?: number, output: Array<{url: string, res_age: number}>}} results
+   */
+  async function showAgingResults(results) {
+    const output = results?.output;
     if (!output || output.length === 0) {
       throw new Error('描画する結果画像がありません');
     }
 
-    const images = await Promise.all(output.map((item) => loadImage(item.url)));
+    agingOutput = output;
+    agingImages = await Promise.all(output.map((item) => loadImage(item.url)));
+    uploadedIndex = Number.isInteger(results.age_idx) ? results.age_idx : -1;
 
-    const CELL_SIZE = 200;
-    const PADDING = 8;
-    const cols = Math.ceil(Math.sqrt(output.length));
-    const rows = Math.ceil(output.length / cols);
+    // 単一表示の初期位置はアップロードした画像に合わせる
+    imageSlider.max = String(output.length - 1);
+    imageSlider.value = String(uploadedIndex >= 0 ? uploadedIndex : 0);
 
-    canvas2.width = cols * CELL_SIZE + (cols + 1) * PADDING;
-    canvas2.height = rows * CELL_SIZE + (rows + 1) * PADDING;
-
-    const ctx = canvas2.getContext('2d');
-    ctx.fillStyle = '#1e1e1e';
-    ctx.fillRect(0, 0, canvas2.width, canvas2.height);
-
-    images.forEach((img, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const boxX = PADDING + col * (CELL_SIZE + PADDING);
-      const boxY = PADDING + row * (CELL_SIZE + PADDING);
-
-      const rect = containRect(img.naturalWidth, img.naturalHeight, boxX, boxY, CELL_SIZE, CELL_SIZE);
-      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
-
-      const resAge = output[i]?.res_age;
-      if (resAge !== undefined) {
-        const label = `${resAge}歳`;
-        ctx.font = '16px sans-serif';
-        const textWidth = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-        ctx.fillRect(boxX, boxY + CELL_SIZE - 22, textWidth + 8, 22);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(label, boxX + 4, boxY + CELL_SIZE - 6);
-      }
-    });
-
-    canvas2.style.display = 'block';
+    viewMode = 'grid';
+    resultControls.style.display = 'flex';
+    renderResults();
   }
 
+  viewModeBtn.addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'single' : 'grid';
+    renderResults();
+  });
+
+  imageSlider.addEventListener('input', () => {
+    const index = Number(imageSlider.value);
+    drawSingle(index);
+    updateAgeLabel(index);
+  });
+
   test.addEventListener('click', async () => {
+    let fileId = null;
     try {
-      status.textContent = 'resizing...';
+      hideResults();
+      status.textContent = '画像を準備しています...';
       const resizedBlob = await resizeToJpegUnderSize(capturedBlob);
-      status.textContent = 'uploading...';
-      const fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
+
+      status.textContent = '画像を送信しています...';
+      fileId = await uploadAndGetFileId(resizedBlob, UPLOAD_URL);
       console.log('[main] Uploaded file_id:', fileId);
 
-      status.textContent = 'aging処理を開始しています...';
+      status.textContent = '年齢変化の生成を開始しています...';
       const taskId = await startTask(fileId);
 
-      status.textContent = 'aging処理を実行中です...';
+      status.textContent = '生成中です。しばらくお待ちください...';
       const final = await pollTask(taskId);
       console.log('[main] Final response:', final);
 
-      const output = final?.data?.results?.output;
-      if (output && output.length > 0) {
+      const results = final?.data?.results;
+      if (results?.output?.length > 0) {
         status.textContent = '結果画像を読み込み中...';
-        await drawOutputGridToCanvas2(output);
+        await showAgingResults(results);
       }
-      status.textContent = 'aging処理が完了しました';
+      status.textContent = '生成が完了しました';
     } catch (e) {
       console.error('[main] Flow error:', e);
       status.textContent = 'エラー: ' + e.message;
+    } finally {
+      // 成功・失敗どちらでも、送信した写真はサーバーに残さない
+      if (fileId) {
+        await deleteUploadedFile(fileId);
+      }
     }
   });
   startBtn.addEventListener('click', async () => {
@@ -370,6 +565,7 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true });
       video.srcObject = stream;
+      showLiveCamera();
       status.textContent = 'カメラ映像を表示中';
       startBtn.textContent = 'カメラを停止';
       captureBtn.disabled = false;
@@ -378,12 +574,38 @@
     }
   });
 
+  /**
+   * カメラ映像の表示に戻す(撮り直し)。撮影済みの状態をすべて破棄する。
+   */
+  function showLiveCamera() {
+    hideResults();
+    showInStage('camera');
+    capturedBlob = null;
+    captureBtn.textContent = '撮影する';
+    test.disabled = true;
+  }
+
   captureBtn.addEventListener('click', () => {
     if (!stream) return;
+
+    // 2回目以降は「撮り直す」として機能し、カメラ映像の表示に戻す
+    if (capturedBlob) {
+      showLiveCamera();
+      status.textContent = 'カメラ映像を表示中';
+      return;
+    }
+
+    // #canvasは撮影した写真の表示と結果表示を兼ねるため、前回のaging結果が
+    // 表示されたままなら隠してから撮影分を描き込む。
+    hideResults();
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // カメラ映像と同じ位置に、撮影した写真(canvas)を表示する
+    showInStage('canvas');
 
     canvas.toBlob((blob) => {
       capturedBlob = blob;
@@ -392,19 +614,12 @@
         URL.revokeObjectURL(capturedImageUrl);
       }
 
-      // PNG画像のURLを変数に保存し、imgタグに描画する
       capturedImageUrl = URL.createObjectURL(blob);
-      preview.src = capturedImageUrl;
-      preview.style.display = 'block';
 
-      downloadLink.href = capturedImageUrl;
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      downloadLink.download = `capture-${ts}.png`;
-      downloadLink.style.display = 'inline-block';
-
-      status.textContent = 'PNG画像をimgタグに描画しました';
+      status.textContent = '撮影しました。この写真でよければ「年齢の変化を見る」を押してください';
+      captureBtn.textContent = '撮り直す';
+      test.disabled = false;
     }, 'image/png');
-    test.disabled=false;
   });
 </script>
 </body>

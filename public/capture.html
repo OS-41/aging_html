@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>撮影ブース</title>
+<link rel="stylesheet" href="booth.css">
+<style>
+  /* 撮影後に表示する受付番号。閲覧ブースで呼ばれる順番そのもの */
+  .receipt {
+    text-align: center;
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 28px 32px;
+    width: 100%;
+  }
+  .receipt-label {
+    color: var(--muted);
+    font-size: 16px;
+    margin: 0;
+  }
+  .receipt-number {
+    font-size: clamp(56px, 14vw, 96px);
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    margin: 4px 0 8px;
+  }
+  .receipt-note {
+    margin: 0;
+    font-size: clamp(16px, 2.2vw, 19px);
+  }
+</style>
+</head>
+<body>
+  <div class="booth">
+    <div class="booth-header">
+      <h1>未来のあなたを撮影します</h1>
+      <p class="subtitle">撮影した写真は、この先の会場でご覧いただけます</p>
+    </div>
+
+    <p class="status" id="status">「カメラを開始」を押してください</p>
+
+    <div class="stage" id="stage">
+      <!-- カメラ映像は直接見せず、背景と合成した結果(#preview)を見せる -->
+      <video id="video" autoplay playsinline muted hidden></video>
+      <canvas id="preview"></canvas>
+      <canvas id="canvas" hidden></canvas>
+    </div>
+
+    <div class="receipt" id="receipt" hidden>
+      <p class="receipt-label">あなたの番号</p>
+      <p class="receipt-number" id="receiptNumber">—</p>
+      <p class="receipt-note">この番号の順に呼ばれます。このまま次へお進みください。</p>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="startBtn">カメラを開始</button>
+      <button type="button" id="captureBtn" class="primary" disabled>撮影する</button>
+      <button type="button" id="sendBtn" class="primary" hidden>この写真を送る</button>
+      <button type="button" id="retakeBtn" hidden>撮り直す</button>
+    </div>
+
+    <div class="staff-bar">
+      <span>撮影ブース</span>
+      <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
+      <label>背景
+        <select id="backgroundSelect">
+          <option value="backgrounds/ocean.svg">海の中</option>
+          <option value="">背景なし</option>
+        </select>
+      </label>
+      <span id="segmentState">背景合成: 準備中</span>
+      <button type="button" class="quiet" id="resetBtn">次の人へ</button>
+    </div>
+  </div>
+
+<script src="common.js"></script>
+<script>
+  const stage = document.getElementById('stage');
+  const video = document.getElementById('video');
+  const preview = document.getElementById('preview');
+  const canvas = document.getElementById('canvas');
+  const backgroundSelect = document.getElementById('backgroundSelect');
+  const segmentState = document.getElementById('segmentState');
+  const statusEl = document.getElementById('status');
+  const startBtn = document.getElementById('startBtn');
+  const captureBtn = document.getElementById('captureBtn');
+  const sendBtn = document.getElementById('sendBtn');
+  const retakeBtn = document.getElementById('retakeBtn');
+  const receipt = document.getElementById('receipt');
+  const receiptNumber = document.getElementById('receiptNumber');
+  const sentCount = document.getElementById('sentCount');
+  const resetBtn = document.getElementById('resetBtn');
+
+  // 送信後、次の来場者のために自動で初期状態へ戻すまでの時間
+  const AUTO_RESET_MS = 20000;
+
+  let stream = null;
+  let capturedBlob = null;
+  let sent = 0;
+  let autoResetTimer = null;
+
+  function setStatus(text, kind = '') {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (kind ? ` is-${kind}` : '');
+  }
+
+  /**
+   * 合成した映像(#preview)と撮影した写真(#canvas)を同じ枠で入れ替える。
+   */
+  function showInStage(target) {
+    preview.hidden = target !== 'camera';
+    canvas.hidden = target !== 'canvas';
+  }
+
+  // ---- 背景合成 ----
+  // 人物だけを切り抜いて背景画像の上に重ねる。切り抜きにはMediaPipeの
+  // Selfie Segmentationを使うが、会場のネットワークで読み込めないことも
+  // あるため、失敗したらカメラ映像をそのまま使う方式に自動で切り替える。
+
+  const previewCtx = preview.getContext('2d');
+  let backgroundImage = null;
+  let segmenter = null;
+  let segmentationReady = false;
+
+  function setSegmentState(text) {
+    segmentState.textContent = `背景合成: ${text}`;
+  }
+
+  async function loadBackground(src) {
+    if (!src) {
+      backgroundImage = null;
+      return;
+    }
+    try {
+      backgroundImage = await loadImage(src);
+    } catch (err) {
+      backgroundImage = null;
+      logEvent({ level: 'warn', event: 'background:load', message: `${src} を読み込めません` });
+    }
+  }
+
+  /**
+   * 切り抜いた人物を背景の上に重ねて#previewへ描く。
+   * @param {CanvasImageSource} frame - カメラのフレーム
+   * @param {CanvasImageSource|null} mask - 人物部分のマスク(無ければ合成しない)
+   */
+  function drawComposite(frame, mask) {
+    const width = video.videoWidth || preview.width;
+    const height = video.videoHeight || preview.height;
+    if (!width || !height) return;
+
+    if (preview.width !== width || preview.height !== height) {
+      preview.width = width;
+      preview.height = height;
+    }
+
+    previewCtx.save();
+    previewCtx.clearRect(0, 0, width, height);
+
+    if (mask && backgroundImage) {
+      // マスクの形に人物を切り抜き、その後ろへ背景を敷く
+      previewCtx.drawImage(mask, 0, 0, width, height);
+      previewCtx.globalCompositeOperation = 'source-in';
+      previewCtx.drawImage(frame, 0, 0, width, height);
+      previewCtx.globalCompositeOperation = 'destination-over';
+      drawBackgroundCover(width, height);
+    } else {
+      previewCtx.drawImage(frame, 0, 0, width, height);
+    }
+
+    previewCtx.restore();
+  }
+
+  /**
+   * 背景画像を縦横比を保ったまま画面いっぱいに敷く。
+   */
+  function drawBackgroundCover(width, height) {
+    const scale = Math.max(width / backgroundImage.naturalWidth, height / backgroundImage.naturalHeight);
+    const w = backgroundImage.naturalWidth * scale;
+    const h = backgroundImage.naturalHeight * scale;
+    previewCtx.drawImage(backgroundImage, (width - w) / 2, (height - h) / 2, w, h);
+  }
+
+  /**
+   * MediaPipeのSelfie Segmentationを読み込む。
+   * 読み込めなければ合成なしで動かす。
+   */
+  async function setupSegmentation() {
+    const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation';
+    try {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = `${CDN}/selfie_segmentation.js`;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('スクリプトを読み込めません'));
+        document.head.appendChild(script);
+      });
+
+      segmenter = new SelfieSegmentation({ locateFile: (file) => `${CDN}/${file}` });
+      segmenter.setOptions({ modelSelection: 1 });
+      segmenter.onResults((results) => {
+        drawComposite(results.image, results.segmentationMask);
+      });
+
+      segmentationReady = true;
+      setSegmentState('有効');
+      logEvent({ event: 'segmentation:ready', message: '人物切り抜きを有効化' });
+    } catch (err) {
+      segmentationReady = false;
+      setSegmentState('利用できません（背景なしで撮影します）');
+      logEvent({ level: 'warn', event: 'segmentation:unavailable', message: err.message });
+    }
+  }
+
+  /**
+   * カメラのフレームごとに合成して表示し続ける。
+   */
+  async function renderLoop() {
+    if (stream && video.readyState >= 2) {
+      if (segmentationReady && backgroundImage) {
+        try {
+          await segmenter.send({ image: video });
+        } catch (err) {
+          segmentationReady = false;
+          setSegmentState('停止しました（背景なしで撮影します）');
+          logEvent({ level: 'error', event: 'segmentation:failed', message: err.message });
+        }
+      } else {
+        drawComposite(video, null);
+      }
+    }
+    requestAnimationFrame(renderLoop);
+  }
+
+  async function startCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+      showInStage('camera');
+      startBtn.hidden = true;
+      captureBtn.disabled = false;
+      setStatus('正面を向いて「撮影する」を押してください');
+    } catch (err) {
+      setStatus('カメラを使用できません。係員をお呼びください', 'error');
+      logEvent({ level: 'error', event: 'camera:failed', message: err.message });
+    }
+  }
+
+  backgroundSelect.addEventListener('change', () => loadBackground(backgroundSelect.value));
+
+  /**
+   * 撮影前の状態に戻す。次の来場者への切り替えにも使う。
+   */
+  function resetToCamera() {
+    clearTimeout(autoResetTimer);
+    capturedBlob = null;
+    stage.hidden = false;
+    showInStage('camera');
+    receipt.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    captureBtn.hidden = false;
+    captureBtn.disabled = !stream;
+    setStatus(stream ? '正面を向いて「撮影する」を押してください' : '「カメラを開始」を押してください');
+  }
+
+  /**
+   * 10MB以内のJPEGに収まるよう、画質と寸法を落としながら変換する。
+   */
+  async function toJpegUnderSize(blob, maxBytes = 10 * 1024 * 1024) {
+    const imageBitmap = await createImageBitmap(blob);
+    let width = imageBitmap.width;
+    let height = imageBitmap.height;
+    let quality = 0.92;
+    let resultBlob = null;
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const work = document.createElement('canvas');
+      work.width = width;
+      work.height = height;
+      work.getContext('2d').drawImage(imageBitmap, 0, 0, width, height);
+
+      resultBlob = await new Promise((resolve) => work.toBlob(resolve, 'image/jpeg', quality));
+      if (resultBlob.size <= maxBytes) {
+        return resultBlob;
+      }
+
+      if (quality > 0.5) {
+        quality -= 0.1;
+      } else {
+        width = Math.round(width * 0.8);
+        height = Math.round(height * 0.8);
+      }
+    }
+    return resultBlob;
+  }
+
+  startHeartbeat('capture');
+  loadBackground(backgroundSelect.value);
+  setupSegmentation();
+  renderLoop();
+
+  startBtn.addEventListener('click', startCamera);
+
+  captureBtn.addEventListener('click', () => {
+    if (!stream) return;
+
+    // 画面に映っている合成結果をそのまま切り取る
+    canvas.width = preview.width;
+    canvas.height = preview.height;
+    canvas.getContext('2d').drawImage(preview, 0, 0);
+    showInStage('canvas');
+
+    canvas.toBlob((blob) => {
+      capturedBlob = blob;
+      captureBtn.hidden = true;
+      sendBtn.hidden = false;
+      retakeBtn.hidden = false;
+      setStatus('この写真でよろしければ「この写真を送る」を押してください');
+    }, 'image/png');
+  });
+
+  retakeBtn.addEventListener('click', resetToCamera);
+  resetBtn.addEventListener('click', resetToCamera);
+
+  sendBtn.addEventListener('click', async () => {
+    if (!capturedBlob) return;
+
+    sendBtn.disabled = true;
+    retakeBtn.disabled = true;
+    setStatus('送信しています...');
+
+    try {
+      const jpeg = await toJpegUnderSize(capturedBlob);
+      const formData = new FormData();
+      formData.append('file', jpeg, 'capture.jpg');
+      formData.append('origin', BACKEND_ORIGIN);
+
+      const result = await callApi('/api/entries', { method: 'POST', body: formData });
+
+      sent += 1;
+      sentCount.textContent = String(sent);
+      receiptNumber.textContent = String(result.sequence);
+      // 番号が最も重要なので、写真を隠して番号だけを大きく見せる
+      stage.hidden = true;
+      receipt.hidden = false;
+      sendBtn.hidden = true;
+      retakeBtn.hidden = true;
+      captureBtn.hidden = true;
+      setStatus('受け付けました。次の場所へお進みください', 'done');
+
+      // 写真の生成はサーバーが裏で進めるため、ここで待つ必要はない
+      autoResetTimer = setTimeout(resetToCamera, AUTO_RESET_MS);
+    } catch (err) {
+      console.error('[capture] send failed:', err);
+      setStatus('送信できませんでした。もう一度お試しください', 'error');
+    } finally {
+      sendBtn.disabled = false;
+      retakeBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
