@@ -67,7 +67,11 @@
       <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
       <label>背景
         <select id="backgroundSelect">
-          <option value="backgrounds/ocean.svg">海の中</option>
+          <option value="sync">閲覧ブースに合わせる</option>
+          <option value="realistic">海の中</option>
+          <option value="storybook">絵本の海</option>
+          <option value="picturebook">水彩の絵本</option>
+          <option value="still">静止画(動きなし)</option>
           <option value="">背景なし</option>
         </select>
       </label>
@@ -77,6 +81,7 @@
   </div>
 
 <script src="common.js"></script>
+<script src="ocean-scene.js"></script>
 <script>
   const stage = document.getElementById('stage');
   const video = document.getElementById('video');
@@ -121,24 +126,94 @@
   // あるため、失敗したらカメラ映像をそのまま使う方式に自動で切り替える。
 
   const previewCtx = preview.getContext('2d');
-  let backgroundImage = null;
   let segmenter = null;
   let segmentationReady = false;
+
+  // 背景として使う海中の演出。閲覧ブースの待機演出と同じ ocean-scene.js で描き、
+  // 撮った写真の中の世界と、この先で見る画面の世界を揃える。
+  // カメラのフレームと同じ大きさで描くと重いので、長辺をこの値までに抑える。
+  const SCENE_MAX_SIDE = 960;
+  // 演出の書き換えはこの間隔で十分(カメラの合成は毎フレーム行う)
+  const SCENE_FRAME_MS = 1000 / 30;
+  // 「閲覧ブースに合わせる」ときに絵柄を確認する間隔
+  const THEME_POLL_MS = 5000;
+
+  const sceneCanvas = document.createElement('canvas');
+  const scene = createOceanScene(sceneCanvas);
+  let sceneLastDrawMs = 0;
+
+  // 背景の指定。'sync'(閲覧ブースに追従) / 絵柄名 / 'still'(静止画) / ''(なし)
+  let backgroundMode = 'sync';
+  let stillImage = null;
 
   function setSegmentState(text) {
     segmentState.textContent = `背景合成: ${text}`;
   }
 
-  async function loadBackground(src) {
-    if (!src) {
-      backgroundImage = null;
+  /**
+   * 今フレームで背景に敷くもの。無ければnull。
+   */
+  function currentBackground() {
+    if (!backgroundMode) return null;
+    if (backgroundMode === 'still') return stillImage;
+    return sceneCanvas;
+  }
+
+  /**
+   * 背景の指定を切り替える。
+   */
+  async function applyBackgroundMode(mode) {
+    backgroundMode = mode;
+    if (mode === 'still' && !stillImage) {
+      try {
+        stillImage = await loadImage('backgrounds/ocean.svg');
+      } catch (err) {
+        stillImage = null;
+        logEvent({ level: 'warn', event: 'background:load', message: 'backgrounds/ocean.svg を読み込めません' });
+      }
+    }
+    if (mode && mode !== 'still' && mode !== 'sync') {
+      scene.setTheme(mode);
+    }
+  }
+
+  /**
+   * 閲覧ブースで選ばれている絵柄に合わせる。
+   */
+  async function syncTheme() {
+    if (backgroundMode !== 'sync') return;
+    try {
+      const display = await callApi('/api/display');
+      if (scene.setTheme(display.theme)) {
+        logEvent({ event: 'background:theme', message: `背景を ${display.theme} に合わせた` });
+      }
+    } catch (err) {
+      // 取得できなければ現在の絵柄のまま描き続ける
+    }
+  }
+
+  /**
+   * 演出をカメラのフレームと同じ縦横比で描き進める。
+   */
+  function updateScene(width, height, nowMs) {
+    const scale = Math.min(1, SCENE_MAX_SIDE / Math.max(width, height));
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+    if (sceneCanvas.width !== w || sceneCanvas.height !== h) {
+      scene.resize(w, h);
+      sceneLastDrawMs = 0;
+    }
+    if (scene.reduceMotion) {
+      // 動きを抑える設定のときは最初の1枚だけ描く
+      if (!sceneLastDrawMs) {
+        scene.drawFrame(nowMs);
+        sceneLastDrawMs = nowMs;
+      }
       return;
     }
-    try {
-      backgroundImage = await loadImage(src);
-    } catch (err) {
-      backgroundImage = null;
-      logEvent({ level: 'warn', event: 'background:load', message: `${src} を読み込めません` });
+    if (nowMs - sceneLastDrawMs >= SCENE_FRAME_MS) {
+      scene.drawFrame(nowMs);
+      sceneLastDrawMs = nowMs;
     }
   }
 
@@ -157,16 +232,18 @@
       preview.height = height;
     }
 
+    const background = currentBackground();
+
     previewCtx.save();
     previewCtx.clearRect(0, 0, width, height);
 
-    if (mask && backgroundImage) {
+    if (mask && background) {
       // マスクの形に人物を切り抜き、その後ろへ背景を敷く
       previewCtx.drawImage(mask, 0, 0, width, height);
       previewCtx.globalCompositeOperation = 'source-in';
       previewCtx.drawImage(frame, 0, 0, width, height);
       previewCtx.globalCompositeOperation = 'destination-over';
-      drawBackgroundCover(width, height);
+      drawBackgroundCover(background, width, height);
     } else {
       previewCtx.drawImage(frame, 0, 0, width, height);
     }
@@ -175,13 +252,17 @@
   }
 
   /**
-   * 背景画像を縦横比を保ったまま画面いっぱいに敷く。
+   * 背景を縦横比を保ったまま画面いっぱいに敷く。
+   * 静止画(Image)でも演出(canvas)でも同じように扱う。
    */
-  function drawBackgroundCover(width, height) {
-    const scale = Math.max(width / backgroundImage.naturalWidth, height / backgroundImage.naturalHeight);
-    const w = backgroundImage.naturalWidth * scale;
-    const h = backgroundImage.naturalHeight * scale;
-    previewCtx.drawImage(backgroundImage, (width - w) / 2, (height - h) / 2, w, h);
+  function drawBackgroundCover(background, width, height) {
+    const srcWidth = background.naturalWidth || background.width;
+    const srcHeight = background.naturalHeight || background.height;
+    if (!srcWidth || !srcHeight) return;
+    const scale = Math.max(width / srcWidth, height / srcHeight);
+    const w = srcWidth * scale;
+    const h = srcHeight * scale;
+    previewCtx.drawImage(background, (width - w) / 2, (height - h) / 2, w, h);
   }
 
   /**
@@ -218,9 +299,13 @@
   /**
    * カメラのフレームごとに合成して表示し続ける。
    */
-  async function renderLoop() {
+  async function renderLoop(nowMs = performance.now()) {
     if (stream && video.readyState >= 2) {
-      if (segmentationReady && backgroundImage) {
+      const background = currentBackground();
+      if (background === sceneCanvas) {
+        updateScene(video.videoWidth || preview.width, video.videoHeight || preview.height, nowMs);
+      }
+      if (segmentationReady && background) {
         try {
           await segmenter.send({ image: video });
         } catch (err) {
@@ -250,7 +335,7 @@
     }
   }
 
-  backgroundSelect.addEventListener('change', () => loadBackground(backgroundSelect.value));
+  backgroundSelect.addEventListener('change', () => applyBackgroundMode(backgroundSelect.value));
 
   /**
    * 撮影前の状態に戻す。次の来場者への切り替えにも使う。
@@ -300,7 +385,9 @@
   }
 
   startHeartbeat('capture');
-  loadBackground(backgroundSelect.value);
+  applyBackgroundMode(backgroundSelect.value);
+  syncTheme();
+  setInterval(syncTheme, THEME_POLL_MS);
   setupSegmentation();
   renderLoop();
 
