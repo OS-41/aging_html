@@ -244,12 +244,26 @@ let entrySequence = 0;
 // 滞留するのは「移動時間 × 撮影ペース」の分だけなので、10分運用なら
 // 数十件程度。余裕をみた上限と、閉場後に残さないための保持期間を設ける。
 const MAX_ENTRIES = 300;
-const ENTRY_TTL_MS = 60 * 60 * 1000; // 60分
+const ENTRY_TTL_MS = 30 * 60 * 1000; // 30分
 const RESULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 
 // 閲覧ブースの画面は職員が任意のタイミングでまとめて入れ替える。
 // 一度に何人分を並べるかはここで決める。
 const DISPLAY_SLOT_COUNT = 6;
+
+/*
+ * 取り込む結果画像の年齢。
+ *
+ * aging APIは複数の年齢を返すが、閲覧ブースで見せるのは1枚だけなので、
+ * その1枚しか取り込まない。ディスクと取り込み時間が枚数ぶん減り、
+ * 1枚でも取得に失敗すると受付ごと失敗する範囲も狭くなる。
+ *
+ * `public/view.html` の DISPLAY_AGE と合わせること。
+ * **null にすると、APIが返した全年齢を取り込む(以前の動作)。**
+ * 表示する年齢を後から変えたくなったとき、または複数年齢を見せる仕様に
+ * 戻すときは、ここを null にすれば保存側は元に戻る。
+ */
+const SAVED_RESULT_AGE = 70;
 
 // 現在、閲覧ブースに映している受付ID
 let displayBatch = [];
@@ -301,12 +315,14 @@ const SERVER_STARTED_AT_MS = Date.now();
 /**
  * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
  *
- * サーバー側の記録はすべてここを通し、係員画面の処理履歴に出す。
- * ただし警告と異常だけはホスティング側のログにも流す。処理履歴は
- * メモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
- * 係員画面自体が開けないため。
+ * サーバー側の記録はすべてここを通す。console.log は使わない。
+ *
+ * 警告と異常、および echo を指定したものは、ホスティング側のログにも流す。
+ * 処理履歴はメモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
+ * 係員画面自体が開けないため、そこだけは二重に残す。
+ * @param {boolean} [options.echo] - infoでもホスティング側のログに出すか
  */
-function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null }) {
+function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null, echo = false }) {
   logSequence += 1;
   logStore.push({
     id: logSequence,
@@ -322,9 +338,14 @@ function addLog({ source = 'server', level = 'info', event, message = '', status
     logStore.splice(0, logStore.length - MAX_LOG_ENTRIES);
   }
 
-  if (level === 'warn' || level === 'error') {
+  if (echo || level === 'warn' || level === 'error') {
     const label = sequence ? `[${event} #${sequence}]` : `[${event}]`;
-    console.error(`${label} ${message}${status ? ` (status ${status})` : ''}`);
+    const line = `${label} ${message}${status ? ` (status ${status})` : ''}`;
+    if (level === 'warn' || level === 'error') {
+      console.error(line);
+    } else {
+      console.info(line);
+    }
   }
 }
 
@@ -592,15 +613,26 @@ async function processEntry(entry, origin) {
       throw new Error('生成結果が空でした');
     }
 
+    const wanted = selectSavedOutputs(outputs);
     entry.outputs = await Promise.all(
-      outputs.map((output, index) => downloadResultImage(entry.id, index, output, entry.sequence))
+      wanted.map((output, index) => downloadResultImage(entry.id, index, output, entry.sequence))
     );
     entry.age = results.age ?? null;
-    entry.ageIdx = Number.isInteger(results.age_idx) ? results.age_idx : null;
+    // age_idx は「いまの年齢」がAPIの返した何枚目かを指す。絞り込むと
+    // 番号がずれるうえ、その1枚は取り込んでいないので持たない
+    entry.ageIdx = wanted.length === outputs.length && Number.isInteger(results.age_idx)
+      ? results.age_idx
+      : null;
     entry.ageMin = results.age_min ?? null;
     entry.ageMax = results.age_max ?? null;
     entry.status = 'ready';
-    addLog({ event: 'entry:ready', sequence: entry.sequence, message: `結果画像 ${entry.outputs.length}枚を保存` });
+    addLog({
+      event: 'entry:ready',
+      sequence: entry.sequence,
+      message: wanted.length === outputs.length
+        ? `結果画像 ${entry.outputs.length}枚を保存`
+        : `結果画像 ${entry.outputs.length}枚を保存(${outputs.length}枚中、${wanted.map((o) => `${o.res_age}歳`).join('/')})`
+    });
   } catch (err) {
     entry.status = 'error';
     entry.error = err.message;
@@ -611,6 +643,22 @@ async function processEntry(entry, origin) {
     }
     addLog({ level: 'error', event: 'entry:error', sequence: entry.sequence, message: err.message });
   }
+}
+
+/**
+ * APIが返した結果のうち、実際に取り込むものを選ぶ。
+ * SAVED_RESULT_AGE が null なら全部、そうでなければその年齢に最も近い1枚。
+ * (依頼内容によってAPIが返す年齢は変わるため、完全一致は求めない)
+ * @param {Array<{res_age: number, url: string}>} outputs
+ */
+function selectSavedOutputs(outputs) {
+  if (SAVED_RESULT_AGE === null || outputs.length === 0) {
+    return outputs;
+  }
+  const nearest = outputs.reduce((best, output) =>
+    Math.abs(output.res_age - SAVED_RESULT_AGE) < Math.abs(best.res_age - SAVED_RESULT_AGE) ? output : best
+  );
+  return [nearest];
 }
 
 /**
@@ -1112,10 +1160,13 @@ app.use(BASE_PATH || '/', router);
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
 // Bad Gatewayになるケースを避ける。
 app.listen(PORT, '0.0.0.0', () => {
-  // 起動の一報だけはホスティング側のログに出す。この時点では
-  // 係員画面をまだ開けないため。
-  console.log(`サーバーが起動しました: http://localhost:${PORT}${BASE_PATH || ''}/`);
-  // 処理履歴の先頭にも残す。再起動すると受付中の写真と結果が消えるため、
+  // 処理履歴の先頭に残す。再起動すると受付中の写真と結果が消えるため、
   // 係員が「なぜ番号が出てこないのか」を追えるようにしておく。
-  addLog({ event: 'server:start', message: `サーバーを起動しました(保管中の受付と結果は初期化されています)` });
+  // echo でホスティング側のログにも出す。起動した事実と待ち受けポートは、
+  // 係員画面を開けないうちに確認したい唯一の情報のため。
+  addLog({
+    event: 'server:start',
+    echo: true,
+    message: `http://localhost:${PORT}${BASE_PATH || ''}/ で待ち受け開始(保管中の受付と結果は初期化されています)`
+  });
 });

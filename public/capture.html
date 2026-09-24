@@ -149,6 +149,11 @@
     <div class="staff-bar">
       <span>撮影ブース</span>
       <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
+      <label>カメラ
+        <select id="cameraSelect">
+          <option value="">既定のカメラ</option>
+        </select>
+      </label>
       <label>背景
         <select id="backgroundSelect">
           <option value="image:aging_captureBackground.webp">絵本のわく</option>
@@ -173,6 +178,7 @@
   const preview = document.getElementById('preview');
   const canvas = document.getElementById('canvas');
   const backgroundSelect = document.getElementById('backgroundSelect');
+  const cameraSelect = document.getElementById('cameraSelect');
   const segmentState = document.getElementById('segmentState');
   const statusEl = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
@@ -224,6 +230,9 @@
   const CONFIRM_INTERVAL_MS = 1500;
 
   let stream = null;
+  // 使うカメラ。撮影・送信・次の人への切り替えでは変えない。
+  // 記憶の読み出しは起動処理(下部)で行う
+  let cameraId = '';
   let capturedBlob = null;
   let sent = 0;
   let autoResetTimer = null;
@@ -258,6 +267,10 @@
   const SCENE_FRAME_MS = 1000 / 30;
   // 「閲覧ブースに合わせる」ときに絵柄を確認する間隔
   const THEME_POLL_MS = 5000;
+
+  // 使うカメラの記憶先。撮影のたびに選び直さずに済むよう、
+  // 端末のブラウザに残す(撮影・送信・次の人への切り替えでは消さない)。
+  const CAMERA_STORAGE_KEY = 'aging-capture-camera';
 
   const sceneCanvas = document.createElement('canvas');
   const scene = createOceanScene(sceneCanvas);
@@ -454,20 +467,123 @@
     requestAnimationFrame(renderLoop);
   }
 
+  // ---- 使うカメラの選択 ----
+  // USB接続のWebカメラを使う場合、内蔵カメラが選ばれてしまうことがある。
+  // 係員が選び直せるようにし、選んだものは端末に覚えさせる。
+
+  /**
+   * 記憶しているカメラのID。読めない環境(プライベートウィンドウなど)では空。
+   */
+  function loadCameraId() {
+    try {
+      return localStorage.getItem(CAMERA_STORAGE_KEY) || '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function saveCameraId(deviceId) {
+    try {
+      if (deviceId) {
+        localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+      } else {
+        localStorage.removeItem(CAMERA_STORAGE_KEY);
+      }
+    } catch (err) {
+      // 保存できなくても、そのセッション中は選択が効いていればよい
+    }
+  }
+
+  /**
+   * 接続されているカメラを選択欄に並べる。
+   * 機器名は撮影の許可が下りるまで空になるため、カメラ開始後にも呼ぶ。
+   */
+  async function refreshCameraList() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    let devices;
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (err) {
+      return;
+    }
+
+    // 撮影の許可が下りるまで、ブラウザは deviceId を空で返す。
+    // その状態の一覧で判断すると、記憶している機器を「外れた」と
+    // 誤解して消してしまうため、IDが読めるまでは触らない。
+    const cameras = devices.filter((device) => device.kind === 'videoinput' && device.deviceId);
+    if (cameras.length === 0) return;
+
+    const options = [new Option('既定のカメラ', '')];
+    cameras.forEach((camera, index) => {
+      options.push(new Option(camera.label || `カメラ ${index + 1}`, camera.deviceId));
+    });
+    cameraSelect.replaceChildren(...options);
+
+    // 記憶していた機器がまだ繋がっていればそれを選ぶ
+    const known = cameras.some((camera) => camera.deviceId === cameraId);
+    cameraSelect.value = known ? cameraId : '';
+    if (cameraId && !known) {
+      // 機器が外れている。次回は既定のカメラに戻す
+      cameraId = '';
+      saveCameraId('');
+      logEvent({ level: 'warn', event: 'camera:missing', message: '記憶していたカメラが見つかりません' });
+    }
+  }
+
+  /**
+   * 現在のカメラを止める。選び直すときに掴みっぱなしにしないため。
+   */
+  function stopCamera() {
+    if (!stream) return;
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    stream = null;
+    video.srcObject = null;
+  }
+
   async function startCamera() {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      // 記憶した機器を要求し、外れていれば既定のカメラへ戻す
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: cameraId ? { deviceId: { exact: cameraId } } : { facingMode: 'user' }
+        });
+      } catch (err) {
+        if (!cameraId) throw err;
+        logEvent({ level: 'warn', event: 'camera:fallback', message: `選択中のカメラを使えません: ${err.message}` });
+        cameraId = '';
+        saveCameraId('');
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      }
+
       video.srcObject = stream;
       await video.play().catch(() => {});
       showInStage('camera');
       startBtn.hidden = true;
       captureBtn.disabled = false;
       setStatus('正面を向いて「撮影する」を押してください');
+      // 許可が下りたので、ここで初めて機器名が読める
+      await refreshCameraList();
     } catch (err) {
       setStatus('カメラを使用できません。係員をお呼びください', 'error');
       logEvent({ level: 'error', event: 'camera:failed', message: err.message });
     }
   }
+
+  cameraSelect.addEventListener('change', async () => {
+    cameraId = cameraSelect.value;
+    saveCameraId(cameraId);
+    logEvent({ event: 'camera:selected', message: cameraSelect.selectedOptions[0]?.textContent || '既定のカメラ' });
+    if (!stream) return;
+    // 開いている最中なら、その場で繋ぎ直す
+    stopCamera();
+    captureBtn.disabled = true;
+    await startCamera();
+  });
+
+  // 機器の抜き差しに追従する
+  navigator.mediaDevices?.addEventListener?.('devicechange', refreshCameraList);
 
   backgroundSelect.addEventListener('change', () => applyBackgroundMode(backgroundSelect.value));
 
@@ -587,6 +703,8 @@
   }
 
   startHeartbeat('capture');
+  cameraId = loadCameraId();
+  refreshCameraList();
   applyBackgroundMode(backgroundSelect.value);
   syncTheme();
   setInterval(syncTheme, THEME_POLL_MS);
