@@ -14,7 +14,7 @@
   "author": "",
   "type": "commonjs",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "main": "server.js",
   "scripts": {
