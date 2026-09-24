@@ -67,11 +67,12 @@
       <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
       <label>背景
         <select id="backgroundSelect">
+          <option value="image:aging_captureBackground.webp">絵本のわく</option>
           <option value="sync">閲覧ブースに合わせる</option>
           <option value="realistic">海の中</option>
           <option value="storybook">絵本の海</option>
           <option value="picturebook">水彩の絵本</option>
-          <option value="still">静止画(動きなし)</option>
+          <option value="image:ocean.svg">静止画(海の中)</option>
           <option value="">背景なし</option>
         </select>
       </label>
@@ -142,9 +143,16 @@
   const scene = createOceanScene(sceneCanvas);
   let sceneLastDrawMs = 0;
 
-  // 背景の指定。'sync'(閲覧ブースに追従) / 絵柄名 / 'still'(静止画) / ''(なし)
-  let backgroundMode = 'sync';
-  let stillImage = null;
+  // 背景の指定。'image:<ファイル名>'(静止画) / 'sync'(閲覧ブースに追従) /
+  // 絵柄名(海中の演出を固定) / ''(背景なし)
+  let backgroundMode = 'image:aging_captureBackground.webp';
+  // 読み込み済みの静止画をファイル名で持っておく
+  const stillImages = new Map();
+
+  // 閲覧ブースが玉手箱の絵柄のときは、撮影ブースでは使えない
+  // (浜辺と煙の構図で、人物を重ねる前提になっていないため)。
+  // 雰囲気が近い水彩の絵本へ読み替える。
+  const SYNC_FALLBACK = { tamatebako: 'picturebook' };
 
   function setSegmentState(text) {
     segmentState.textContent = `背景合成: ${text}`;
@@ -155,7 +163,9 @@
    */
   function currentBackground() {
     if (!backgroundMode) return null;
-    if (backgroundMode === 'still') return stillImage;
+    if (backgroundMode.startsWith('image:')) {
+      return stillImages.get(backgroundMode.slice(6)) || null;
+    }
     return sceneCanvas;
   }
 
@@ -164,15 +174,18 @@
    */
   async function applyBackgroundMode(mode) {
     backgroundMode = mode;
-    if (mode === 'still' && !stillImage) {
-      try {
-        stillImage = await loadImage('backgrounds/ocean.svg');
-      } catch (err) {
-        stillImage = null;
-        logEvent({ level: 'warn', event: 'background:load', message: 'backgrounds/ocean.svg を読み込めません' });
+    if (mode.startsWith('image:')) {
+      const name = mode.slice(6);
+      if (!stillImages.has(name)) {
+        try {
+          stillImages.set(name, await loadImage(`backgrounds/${name}`));
+        } catch (err) {
+          logEvent({ level: 'warn', event: 'background:load', message: `backgrounds/${name} を読み込めません` });
+        }
       }
+      return;
     }
-    if (mode && mode !== 'still' && mode !== 'sync') {
+    if (mode && mode !== 'sync') {
       scene.setTheme(mode);
     }
   }
@@ -184,8 +197,9 @@
     if (backgroundMode !== 'sync') return;
     try {
       const display = await callApi('/api/display');
-      if (scene.setTheme(display.theme)) {
-        logEvent({ event: 'background:theme', message: `背景を ${display.theme} に合わせた` });
+      const theme = SYNC_FALLBACK[display.theme] || display.theme;
+      if (scene.setTheme(theme)) {
+        logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
       }
     } catch (err) {
       // 取得できなければ現在の絵柄のまま描き続ける

@@ -16,6 +16,8 @@
     display: grid;
     gap: 16px;
   }
+  /* 待機画面は背景の演出だけを見せる(結果の区画も出さない) */
+  .slots.is-waiting { display: none; }
 
   .slot {
     background: var(--surface);
@@ -134,9 +136,98 @@
   body.is-light .slot-number .label,
   body.is-light .staff-bar { color: #5b8ba3; }
   body.is-light .photo .age { color: #2a5468; }
+
+  /*
+   * 絵柄 tamatebako。浜辺と玉手箱の絵(backgrounds/aging_viewBackground.webp)を
+   * 背景に敷き、その右上に広がる煙の部分へ結果の写真を並べる。
+   * 煙そのもの(#ocean)は絵の上に重ねて描くため、他の絵柄と重ね順が逆になる。
+   */
+  #backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+  }
+  body.is-tamatebako #backdrop {
+    background-image: url('backgrounds/aging_viewBackground.webp');
+    background-position: center 80%;
+    opacity: 1;
+  }
+  body.is-tamatebako #ocean {
+    z-index: 0;
+    pointer-events: none;
+    opacity: 1;
+  }
+  /* 煙の演出が主役なので、区画そのものは煙の中に浮かべる */
+  body.is-tamatebako .booth { position: relative; z-index: 1; }
+  body.is-tamatebako .slots {
+    /* 背景の絵で煙が広がっている範囲。ここに写真を置く。
+       寄ったときに左の見出しへかぶらないよう、左端に余裕をとってある */
+    position: absolute;
+    left: 28%;
+    top: 10%;
+    width: 66%;
+    height: 58%;
+    flex: none;
+    gap: 14px;
+    transform-origin: center center;
+    transition: transform 1.6s cubic-bezier(0.33, 0, 0.2, 1), opacity 0.6s ease;
+  }
+  /* 煙に覆われている間は写真を隠し、その隙に中身を入れ替える */
+  body.is-tamatebako .slots.is-veiled { opacity: 0; transition: none; }
+  /* 少し待ってから写真へ寄る */
+  body.is-tamatebako .slots.is-zoomed { transform: scale(1.18); }
+  body.is-tamatebako .slot {
+    background: rgba(255, 255, 255, 0.5);
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(120, 104, 150, 0.28);
+    backdrop-filter: blur(3px);
+    color: #4a3f63;
+  }
+  body.is-tamatebako .slot.is-empty {
+    background: rgba(255, 255, 255, 0.24);
+    border-color: rgba(255, 255, 255, 0.65);
+    color: #6a5c85;
+  }
+  body.is-tamatebako .slot-number .num { color: #b5628a; }
+  body.is-tamatebako .slot-number .label,
+  body.is-tamatebako .photo .age { color: #4a3f63; }
+  body.is-tamatebako .photo.is-current .age,
+  body.is-tamatebako .photo .now { color: #b5628a; }
+  /* 見出しと係員向けの行は、絵の空いている左上と下辺へ寄せる */
+  /* 見出しは絵の左上(空と海の側)へ寄せる。写真へ寄ったときも重ならない位置 */
+  body.is-tamatebako .booth-header {
+    position: absolute;
+    left: 2%;
+    top: 3%;
+    max-width: 20%;
+    text-align: left;
+  }
+  body.is-tamatebako .booth-header h1 {
+    font-size: clamp(20px, 2.3vw, 32px);
+    white-space: nowrap;
+  }
+  body.is-tamatebako .booth-header .subtitle { font-size: clamp(12px, 1.1vw, 15px); }
+  body.is-tamatebako .booth-header h1,
+  body.is-tamatebako .booth-header .subtitle {
+    color: #f6f1ff;
+    text-shadow: 0 2px 10px rgba(70, 60, 100, 0.75);
+  }
+  body.is-tamatebako .staff-bar {
+    color: #f0eaff;
+    text-shadow: 0 2px 8px rgba(70, 60, 100, 0.8);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body.is-tamatebako .slots { transition: none; }
+  }
 </style>
 </head>
 <body>
+  <div id="backdrop"></div>
   <canvas id="ocean"></canvas>
   <div class="booth">
     <div class="booth-header">
@@ -155,6 +246,7 @@
 
 <script src="common.js"></script>
 <script src="ocean-scene.js"></script>
+<script src="tamatebako-scene.js"></script>
 <script>
   const slotsEl = document.getElementById('slots');
   const subtitle = document.getElementById('subtitle');
@@ -165,6 +257,7 @@
 
   let slotCount = 0;
   let lastUpdatedAt = null;
+  let lastMode = null;
   let rendered = false;
 
   /**
@@ -232,20 +325,26 @@
   }
 
   function render(display) {
-    applyGrid(display.slot_count);
+    // 待機画面のときは背景の演出だけにする。区画は組み立てず、枠も出さない
+    const showingResults = display.mode === 'results';
+    slotsEl.classList.toggle('is-waiting', !showingResults);
 
-    const children = [];
-    for (let i = 0; i < display.slot_count; i++) {
-      const entry = display.entries[i];
-      children.push(entry ? buildSlot(entry) : buildEmptySlot());
+    if (showingResults) {
+      applyGrid(display.slot_count);
+      const children = [];
+      for (let i = 0; i < display.slot_count; i++) {
+        const entry = display.entries[i];
+        children.push(entry ? buildSlot(entry) : buildEmptySlot());
+      }
+      slotsEl.replaceChildren(...children);
+    } else {
+      slotsEl.replaceChildren();
     }
-    slotsEl.replaceChildren(...children);
 
-    const showingResults = display.entries.length > 0;
     subtitle.textContent = showingResults
       ? '画面の番号をお探しください'
       : '次のご案内までしばらくお待ちください';
-    // 待機中は海中の演出をはっきり見せ、結果を出している間は控えめにする
+    // 待機中は背景の演出をはっきり見せ、結果を出している間は控えめにする
     document.getElementById('ocean').classList.toggle('is-dimmed', showingResults);
 
     updatedAtEl.textContent = display.updated_at
@@ -261,13 +360,22 @@
 
       // 内容が変わったときだけ描き直す(画像の再読み込みを避ける)。
       // 初回は係員がまだ一度も更新していなくても、空きスロットを出しておく。
-      if (!rendered || display.updated_at !== lastUpdatedAt) {
+      if (!rendered || display.updated_at !== lastUpdatedAt || display.mode !== lastMode) {
+        const first = !rendered;
         rendered = true;
         lastUpdatedAt = display.updated_at;
-        render(display);
+        lastMode = display.mode;
+
+        // 玉手箱の絵柄では、係員が結果画面に移す操作を煙の演出で見せる。
+        // 初回表示と、待機画面へ戻すときはそのまま切り替える。
+        if (!first && currentTheme === 'tamatebako' && display.mode === 'results') {
+          playReveal(display);
+        } else {
+          render(display);
+        }
         logEvent({
           event: 'display:rendered',
-          message: `${display.entries.length}件を表示`
+          message: display.mode === 'results' ? `${display.entries.length}件を表示` : '待機画面'
         });
       }
     } catch (err) {
@@ -275,30 +383,88 @@
     }
   }
 
-  // ---- 待機中の海中演出 ----
-  // 描画そのものは ocean-scene.js が持つ。撮影ブースの背景合成でも同じ
-  // モジュールを使い、撮る側と見る側で同じ世界を映す。
+  // ---- 待機中の演出 ----
+  // 海中の絵柄(realistic / storybook / picturebook)は ocean-scene.js が、
+  // 玉手箱の絵柄(tamatebako)は tamatebako-scene.js が描く。
+  // 海中の絵柄は撮影ブースの背景合成でも同じモジュールを使い、
+  // 撮る側と見る側で同じ世界を映す。
   // 結果を表示している間は薄くして、写真の邪魔をしない。
 
   const ocean = document.getElementById('ocean');
-  const scene = createOceanScene(ocean);
+  const oceanScene = createOceanScene(ocean);
+  const tamatebakoScene = createTamatebakoScene(ocean, { onPhase: onRevealPhase });
+
+  let currentTheme = 'realistic';
+  // 煙に覆われている間に差し替える内容を持っておく
+  let pendingDisplay = null;
+
+  /**
+   * 今の絵柄を描いているモジュール。
+   */
+  function activeScene() {
+    return currentTheme === 'tamatebako' ? tamatebakoScene : oceanScene;
+  }
 
   /**
    * 係員画面から指定された絵柄に切り替える。
    */
   function applyOceanTheme(theme) {
-    if (!scene.setTheme(theme)) return;
+    if (!theme || theme === currentTheme) return;
+    const known = OCEAN_THEMES.includes(theme) || theme === 'tamatebako';
+    if (!known) return;
+
+    activeScene().stop();
+    currentTheme = theme;
     document.body.classList.toggle('is-light', theme === 'picturebook');
+    document.body.classList.toggle('is-tamatebako', theme === 'tamatebako');
+    // 絵柄をまたぐと区画の置き場所が変わるため、演出の途中の状態は畳んでおく
+    slotsEl.classList.remove('is-veiled', 'is-zoomed');
+
+    if (theme !== 'tamatebako') {
+      oceanScene.setTheme(theme);
+    }
+    resizeOcean();
+    activeScene().start();
     logEvent({ event: 'display:theme', message: `待機演出を ${theme} に切り替え` });
   }
 
+  /**
+   * 玉手箱の演出。煙が画面を覆っている隙に写真を入れ替え、
+   * 煙が晴れてしばらくしてから写真へ寄る。
+   */
+  function playReveal(display) {
+    pendingDisplay = display;
+    // 煙が立ちのぼっている間は区画を見せない
+    slotsEl.classList.add('is-veiled');
+    slotsEl.classList.remove('is-zoomed');
+    tamatebakoScene.play();
+  }
+
+  /**
+   * tamatebako-scene.js から演出の各段階を受け取る。
+   */
+  function onRevealPhase(phase) {
+    if (phase === 'veiled') {
+      // 完全に覆われている間に差し替える
+      slotsEl.classList.add('is-veiled');
+      if (pendingDisplay) {
+        render(pendingDisplay);
+        pendingDisplay = null;
+      }
+    } else if (phase === 'clearing') {
+      slotsEl.classList.remove('is-veiled');
+    } else if (phase === 'zooming') {
+      slotsEl.classList.add('is-zoomed');
+    }
+  }
+
   function resizeOcean() {
-    scene.resize(window.innerWidth, window.innerHeight);
+    activeScene().resize(window.innerWidth, window.innerHeight);
   }
 
   window.addEventListener('resize', resizeOcean);
   resizeOcean();
-  scene.start();
+  activeScene().start();
 
   startHeartbeat('view');
   poll();

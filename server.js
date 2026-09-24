@@ -232,8 +232,12 @@ const DISPLAY_SLOT_COUNT = 4;
 let displayBatch = [];
 let displayUpdatedAtMs = null;
 
+// 閲覧ブースが今どちらの画面かを係員が切り替える。
+// 'waiting' は背景の演出だけ、'results' は結果の区画を並べる。
+let displayMode = 'waiting';
+
 // 閲覧ブースの待機演出の絵柄。係員画面から切り替える(仮運用)
-const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook'];
+const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook', 'tamatebako'];
 let displayTheme = 'realistic';
 
 // ---- 処理履歴 ----
@@ -336,6 +340,7 @@ function currentDisplay() {
   return {
     slot_count: DISPLAY_SLOT_COUNT,
     updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
+    mode: displayMode,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
     entries
@@ -646,8 +651,8 @@ router.get('/api/display', requireBasicAuth, (req, res) => {
 
 /**
  * POST /api/display/advance
- * 未表示のうち古い順に DISPLAY_SLOT_COUNT 人分を画面に載せ替える。
- * 職員が頃合いを見てまとめて更新するための操作。
+ * 未表示のうち古い順に DISPLAY_SLOT_COUNT 人分を画面に載せ替え、
+ * 閲覧ブースを結果画面に切り替える(係員の「結果画面に移行」)。
  */
 router.post('/api/display/advance', requireBasicAuth, (req, res) => {
   const next = entriesInOrder()
@@ -665,6 +670,7 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
   }
   displayBatch = next.map((entry) => entry.id);
   displayUpdatedAtMs = now;
+  displayMode = 'results';
 
   addLog({
     event: 'display:advance',
@@ -691,12 +697,14 @@ router.post('/api/display/theme', requireBasicAuth, (req, res) => {
 
 /**
  * POST /api/display/clear
- * 閲覧ブースの画面を空にする。
+ * 閲覧ブースを待機画面に戻す(係員の「待機画面に移行」)。
+ * 待機画面では背景の演出だけを映し、結果の区画は出さない。
  */
 router.post('/api/display/clear', requireBasicAuth, (req, res) => {
   displayBatch = [];
   displayUpdatedAtMs = Date.now();
-  addLog({ event: 'display:clear', message: '表示を消去' });
+  displayMode = 'waiting';
+  addLog({ event: 'display:clear', message: '待機画面に移行' });
   res.json(currentDisplay());
 });
 

@@ -1,0 +1,28 @@
+# Renderの設定をリポジトリ側に置いたもの(Blueprint)。
+# ダッシュボードで手入力する代わりに、New > Blueprint からこのファイルを
+# 読み込ませると、起動コマンドの打ち間違いを防げる。
+#
+# すでに手でWeb Serviceを作ってある場合は、Settings > Build & Deploy の
+# Start Command を下の startCommand と同じ `npm start` に直すこと。
+# `node run start` は誤り(nodeに run というファイルを探させてしまう)。
+services:
+  - type: web
+    name: aging-demo
+    runtime: node
+    plan: starter        # 無料プランは15分でスリープし、aging APIからの画像取得に失敗する
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz   # 認証と公開パスの外に置いてある
+    envVars:
+      # 値はダッシュボードで入力する(リポジトリには置かない)
+      - key: AGING_API_KEY
+        sync: false
+      - key: PUBLIC_ORIGIN
+        sync: false
+      - key: BASIC_AUTH_USER
+        sync: false
+      - key: BASIC_AUTH_PASSWORD
+        sync: false
+      - key: APP_BASE_PATH
+        sync: false
