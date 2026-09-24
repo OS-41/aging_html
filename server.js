@@ -249,7 +249,7 @@ const RESULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 
 // 閲覧ブースの画面は職員が任意のタイミングでまとめて入れ替える。
 // 一度に何人分を並べるかはここで決める。
-const DISPLAY_SLOT_COUNT = 4;
+const DISPLAY_SLOT_COUNT = 6;
 
 // 現在、閲覧ブースに映している受付ID
 let displayBatch = [];

@@ -10,88 +10,118 @@
    * 職員が数人分をまとめて入れ替える前提の画面。
    * 1画面を人数分に区切り、各区画に番号と結果画像を並べる。
    */
+  /*
+   * 閲覧ブースは離れた場所から見る展示物なので、画面いっぱいを使う。
+   * booth.css の max-width: 900px は手元で読む画面向けの値で、
+   * 2560×1600 や 2360×1640 のディスプレイでは結果が中央の900pxに
+   * 押し込められて小さくなってしまう。
+   */
+  .booth {
+    max-width: none;
+    padding-inline: 2vw;
+    padding-block: 2vh 1.5vh;
+    gap: 1.4vh;
+  }
+
   .slots {
     width: 100%;
     flex: 1;
     display: grid;
-    gap: 12px;
+    gap: 0.7vw;
+    /* 区画は写真と同じ形・同じ大きさにする(applyGrid)。
+       余った分は上下左右に均等に残す */
+    justify-content: center;
+    align-content: center;
   }
   /* 待機画面は背景の演出だけを見せる(結果の区画も出さない) */
   .slots.is-waiting { display: none; }
 
+  /*
+   * 区画は写真そのもの。番号と年齢は写真の上に重ねて、
+   * 面積をすべて写真に回す。
+   */
   .slot {
+    position: relative;
     background: var(--surface);
     border-radius: 16px;
-    /* 写真をできるだけ大きく見せるため、枠の余白は最小限にする */
-    padding: 10px 12px;
-    display: flex;
-    /* 写真は縦長なので、番号を横に置いて高さを写真に回す */
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
+    overflow: hidden;
     min-height: 0;
+    min-width: 0;
   }
   .slot.is-empty {
     border: 2px dashed var(--line);
     background: transparent;
+    display: flex;
     align-items: center;
     justify-content: center;
     color: var(--muted);
+    font-size: clamp(16px, 1.6vw, 22px);
   }
 
+  /* 番号は写真の左上に重ねる。読めるよう背景を敷く */
   .slot-number {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 1;
     display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    align-items: center;
-    line-height: 1.2;
+    align-items: baseline;
+    gap: 6px;
+    padding: 5px 13px 7px 11px;
+    border-radius: 16px 0 14px 0;
+    background: rgba(18, 21, 26, 0.72);
+    line-height: 1.1;
   }
   .slot-number .num {
-    font-size: clamp(26px, 3.2vw, 38px);
+    font-size: clamp(28px, 2.6vw, 44px);
     font-weight: 700;
     line-height: 1;
-    color: var(--accent);
+    color: #ffffff;
     font-variant-numeric: tabular-nums;
   }
   .slot-number .label {
-    font-size: 13px;
-    color: var(--muted);
+    font-size: clamp(12px, 1vw, 16px);
+    color: rgba(255, 255, 255, 0.82);
     white-space: nowrap;
   }
 
   .photos {
-    flex: 1;
+    position: absolute;
+    inset: 0;
     display: flex;
-    gap: 10px;
     min-width: 0;
-    height: 100%;
-    justify-content: center;
   }
   .photo {
     flex: 1;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    align-items: center;
-    justify-content: center;
+    position: relative;
   }
   /*
-   * 受け取った画像は引き伸ばさない。scale-down は「枠に収まるならそのまま、
-   * はみ出すときだけ縮める」ため、小さい画像を拡大してぼかすことがない。
+   * 区画いっぱいに広げる。撮影ブースから送るのはカメラのフレーム
+   * (横長)なので、生成結果も横長で返る。横長の区画に contain で
+   * 収めれば、切り取らずにほぼ全面を使える。
+   * 元より大きく引き伸ばすことは許す。展示用の大画面では、
+   * 原寸に留めると遠くから見えないため。
    */
   .photo img {
     width: 100%;
-    flex: 1;
-    min-height: 0;
-    object-fit: scale-down;
-    border-radius: 10px;
+    height: 100%;
+    object-fit: contain;
+    display: block;
   }
+  /* 年齢は写真の右下に重ねる */
   .photo .age {
-    text-align: center;
-    font-size: clamp(14px, 1.4vw, 17px);
-    font-weight: 600;
-    line-height: 1.3;
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    z-index: 1;
+    padding: 4px 11px 6px 13px;
+    border-radius: 14px 0 16px 0;
+    background: rgba(18, 21, 26, 0.72);
+    color: #ffffff;
+    font-size: clamp(15px, 1.5vw, 22px);
+    font-weight: 700;
+    line-height: 1.2;
   }
   .photo.is-current .age { color: var(--accent); }
   .photo .now {
@@ -147,9 +177,10 @@
     border-color: rgba(120, 180, 210, 0.7);
     color: #5b8ba3;
   }
-  body.is-light .slot-number .label,
   body.is-light .staff-bar { color: #5b8ba3; }
-  body.is-light .photo .age { color: #2a5468; }
+  /* 明るい絵柄では、白のままだと最終更新の時刻が読めない */
+  body.is-light .staff-bar .count { color: #2a5468; }
+  body.is-tamatebako .staff-bar .count { color: #ffffff; }
 
   /*
    * 絵柄 tamatebako。浜辺と玉手箱の絵(backgrounds/aging_viewBackground.jpg)を
@@ -183,9 +214,9 @@
     /* 背景の絵で煙が広がっている範囲。ここに写真を置く。
        寄ったときに左の見出しへかぶらないよう、左端に余裕をとってある */
     position: absolute;
-    left: 23%;
-    top: 3%;
-    width: 75%;
+    left: 2%;
+    top: 9%;
+    width: 96%;
     height: 84%;
     flex: none;
     gap: 14px;
@@ -205,25 +236,28 @@
     border-color: rgba(255, 255, 255, 0.65);
     color: #6a5c85;
   }
-  body.is-tamatebako .slot-number .num { color: #b5628a; }
-  body.is-tamatebako .slot-number .label,
-  body.is-tamatebako .photo .age { color: #4a3f63; }
-  body.is-tamatebako .photo.is-current .age,
-  body.is-tamatebako .photo .now { color: #b5628a; }
+  /* 番号と年齢は写真に重ねた暗いチップの上に出るため、色は共通のまま使う */
   /* 見出しと係員向けの行は、絵の空いている左上と下辺へ寄せる */
-  /* 見出しは絵の左上(空と海の側)へ寄せる。写真へ寄ったときも重ならない位置 */
+  /* 見出しは結果の上に1行で置く。面積は結果に回す */
   body.is-tamatebako .booth-header {
     position: absolute;
     left: 2%;
-    top: 3%;
-    max-width: 20%;
+    top: 1%;
+    right: 2%;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
     text-align: left;
   }
   body.is-tamatebako .booth-header h1 {
-    font-size: clamp(20px, 2.3vw, 32px);
+    font-size: clamp(20px, 2vw, 34px);
     white-space: nowrap;
+    margin: 0;
   }
-  body.is-tamatebako .booth-header .subtitle { font-size: clamp(12px, 1.1vw, 15px); }
+  body.is-tamatebako .booth-header .subtitle {
+    font-size: clamp(12px, 1.1vw, 17px);
+    margin: 0;
+  }
   /* 煙が出ている間は画面が白く飛ぶため、影を濃いめにして読めるようにする */
   body.is-tamatebako .booth-header h1,
   body.is-tamatebako .booth-header .subtitle {
@@ -274,20 +308,72 @@
   // 展示では1枚だけを大きく見せる。
   const DISPLAY_AGE = 70;
 
+  // 結果画像の縦横比。撮影ブースが送るのはカメラのフレームなので横長で
+  // 返る。実際の画像が届いたらその値に直す(下の adoptPhotoAspect)。
+  let photoAspect = 16 / 9;
+
   let slotCount = 0;
   let lastUpdatedAt = null;
   let lastMode = null;
   let rendered = false;
 
   /**
-   * 人数に応じて画面をなるべく正方形に近い区画へ分割する。
+   * 人数に応じて画面を区切る。
+   *
+   * 正方形に近い分割(√n)ではなく、写真がいちばん大きく収まる列数を選ぶ。
+   * 結果は横長なので、区画が正方形に近いほど上下が余ってしまう。
+   * 何列がよいかは画面の形で変わる(6人ならiPadは2列、MacBookは3列)ため、
+   * 表示のたびと画面の大きさが変わったときに計算し直す。
    */
   function applyGrid(count) {
-    if (slotCount === count) return;
     slotCount = count;
-    const cols = Math.ceil(Math.sqrt(count));
-    slotsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    slotsEl.style.gridTemplateRows = `repeat(${Math.ceil(count / cols)}, 1fr)`;
+    const rect = slotsEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const gap = parseFloat(getComputedStyle(slotsEl).columnGap) || 0;
+    const cols = bestColumnCount(count, rect.width, rect.height, gap);
+    const rows = Math.ceil(count / cols);
+
+    // 区画を写真と同じ形にして、白い帯が出ないようにする
+    const cellWidth = (rect.width - gap * (cols - 1)) / cols;
+    const cellHeight = (rect.height - gap * (rows - 1)) / rows;
+    const width = Math.max(1, Math.min(cellWidth, cellHeight * photoAspect));
+    const height = width / photoAspect;
+
+    slotsEl.style.gridTemplateColumns = `repeat(${cols}, ${width}px)`;
+    slotsEl.style.gridTemplateRows = `repeat(${rows}, ${height}px)`;
+  }
+
+  /**
+   * 実際に届いた画像の縦横比を、列数の計算に取り込む。
+   * 目安と大きく違ったときだけ並べ直す(毎回やると無駄に組み直すため)。
+   * @param {number} aspect
+   */
+  function adoptPhotoAspect(aspect) {
+    if (!aspect || Math.abs(aspect - photoAspect) / photoAspect < 0.05) return;
+    photoAspect = aspect;
+    if (slotCount > 0) applyGrid(slotCount);
+  }
+
+  /**
+   * 区画に収まる写真がいちばん大きくなる列数を求める。
+   * @param {number} count - 並べる人数
+   * @param {number} width,height - 並べる領域の大きさ
+   * @param {number} gap - 区画のすき間
+   */
+  function bestColumnCount(count, width, height, gap) {
+    let best = { cols: Math.ceil(Math.sqrt(count)), area: 0 };
+    for (let cols = 1; cols <= count; cols++) {
+      const rows = Math.ceil(count / cols);
+      const cellWidth = (width - gap * (cols - 1)) / cols;
+      const cellHeight = (height - gap * (rows - 1)) / rows;
+      if (cellWidth <= 0 || cellHeight <= 0) continue;
+      // 区画に横長の写真を収めたときの大きさ
+      const photoWidth = Math.min(cellWidth, cellHeight * photoAspect);
+      const area = photoWidth * (photoWidth / photoAspect);
+      if (area > best.area) best = { cols, area };
+    }
+    return best.cols;
   }
 
   function buildSlot(entry) {
@@ -315,6 +401,10 @@
       const img = document.createElement('img');
       img.src = resolveImageUrl(output.url);
       img.alt = `${output.res_age}歳`;
+      img.addEventListener('load', () => {
+        if (!img.naturalWidth || !img.naturalHeight) return;
+        adoptPhotoAspect(img.naturalWidth / img.naturalHeight);
+      });
       img.addEventListener('error', () => {
         logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${output.res_age}歳の画像を表示できません` });
       });
@@ -495,7 +585,13 @@
     activeScene().resize(window.innerWidth, window.innerHeight);
   }
 
-  window.addEventListener('resize', resizeOcean);
+  window.addEventListener('resize', () => {
+    resizeOcean();
+    // 画面の形が変われば最適な列数も変わる
+    if (slotCount > 0 && !slotsEl.classList.contains('is-waiting')) {
+      applyGrid(slotCount);
+    }
+  });
   resizeOcean();
   activeScene().start();
 
