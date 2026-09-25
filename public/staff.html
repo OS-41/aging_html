@@ -90,17 +90,57 @@
   .panel {
     background: var(--surface);
     border-radius: 14px;
-    padding: 18px 20px;
+    padding: 14px 20px 18px;
+  }
+  /* 見出しを押すと開閉する。狭い画面で必要な欄だけ出せるようにするため */
+  .panel > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    user-select: none;
+  }
+  .panel > summary::-webkit-details-marker { display: none; }
+  .panel > summary::before {
+    content: '▾';
+    font-size: 12px;
+    color: var(--muted);
+    transition: transform 0.15s ease;
+  }
+  .panel:not([open]) > summary::before { transform: rotate(-90deg); }
+  .panel > summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
   }
   .panel h2 {
     font-size: 16px;
     font-weight: 700;
-    margin: 0 0 4px;
+    margin: 0;
+  }
+  .panel-body { padding-top: 6px; }
+  /* 閉じているときは高さを取らない。開いているときだけ縦に伸ばす */
+  .panel.grow[open] {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .panel.grow[open] > .panel-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .panel > summary::before { transition: none; }
   }
   .panel .hint {
     color: var(--muted);
     font-size: 13px;
-    margin: 0 0 14px;
+    margin: 4px 0 14px;
   }
 
   .control-row {
@@ -204,8 +244,9 @@
     <div class="console">
     <div class="col-left">
 
-    <section class="panel">
-      <h2>表示の制御</h2>
+    <details class="panel" data-panel="control" open>
+      <summary><h2>表示の制御</h2></summary>
+      <div class="panel-body">
       <p class="hint">
         「結果画面に移行」で、まだ表示していない古い順に<span id="slotCountHint">—</span>人分をまとめて閲覧ブースへ出します。
         「待機画面に移行」に戻すと、閲覧ブースは背景の演出だけになります。
@@ -222,7 +263,11 @@
         <button type="button" id="advanceBtn" class="primary">結果画面に移行（次の—人）</button>
         <button type="button" id="clearBtn">待機画面に移行</button>
         <button type="button" class="quiet" id="reloadBtn">最新の状態に更新</button>
+        <button type="button" class="quiet" id="lockBtn">更新を無効にする</button>
       </div>
+      <p class="now-showing" id="lockNote" hidden>
+        <b class="level-error">閲覧ブースの更新は無効です。</b>「結果画面に移行」「待機画面に移行」は受け付けません。
+      </p>
 
       <p class="now-showing">閲覧ブース: <b id="displayMode">—</b></p>
       <p class="now-showing">表示中: <b id="nowShowing">なし</b> <span id="displayUpdated"></span></p>
@@ -236,10 +281,12 @@
           <option value="tamatebako">玉手箱（浜辺と煙）</option>
         </select>
       </p>
-    </section>
+    </div>
+    </details>
 
-    <section class="panel">
-      <h2>通信状況</h2>
+    <details class="panel" data-panel="clients" open>
+      <summary><h2>通信状況</h2></summary>
+      <div class="panel-body">
       <p class="hint">各ブースの画面からの応答と、aging APIとの通信結果。</p>
       <div class="table-scroll" style="max-height:200px">
         <table>
@@ -251,10 +298,12 @@
       </div>
       <p class="empty" id="clientEmpty">接続中の画面はありません</p>
       <p class="now-showing" id="apiStatus">aging API: —</p>
-    </section>
+    </div>
+    </details>
 
-    <section class="panel" style="flex:1; display:flex; flex-direction:column; min-height:0">
-      <h2>保管中の写真</h2>
+    <details class="panel grow" data-panel="storage" open>
+      <summary><h2>保管中の写真</h2></summary>
+      <div class="panel-body">
       <p class="hint">写真そのものは表示しません。ファイル名と撮影時刻のみ。</p>
       <div class="table-scroll" style="flex:1; max-height:none">
         <table>
@@ -267,13 +316,15 @@
         </table>
       </div>
       <p class="empty" id="entryEmpty">保管中の写真はありません</p>
-    </section>
+    </div>
+    </details>
 
     </div>
     <div class="col-right">
 
-    <section class="panel">
-      <h2>処理履歴</h2>
+    <details class="panel" data-panel="logs" open>
+      <summary><h2>処理履歴</h2></summary>
+      <div class="panel-body">
       <p class="hint">サーバーと各ブースのブラウザ双方の記録。ステータスコードとエラー内容を含みます。</p>
       <div class="table-scroll">
         <table>
@@ -286,7 +337,8 @@
         </table>
       </div>
       <p class="empty" id="logEmpty">履歴はまだありません</p>
-    </section>
+    </div>
+    </details>
 
     </div>
     </div>
@@ -301,6 +353,8 @@
   const advanceBtn = document.getElementById('advanceBtn');
   const clearBtn = document.getElementById('clearBtn');
   const displayModeEl = document.getElementById('displayMode');
+  const lockBtn = document.getElementById('lockBtn');
+  const lockNote = document.getElementById('lockNote');
   const reloadBtn = document.getElementById('reloadBtn');
   const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
@@ -381,12 +435,18 @@
       del.className = 'row-del';
       del.textContent = '削除';
       del.addEventListener('click', async () => {
+        // 取り消すと元の写真も結果画像も戻せないため、必ず確認する
+        const at = timeText(entry.captured_at);
+        if (!confirm(`番号 ${entry.sequence}(${at} 撮影)の写真を削除します。\n保管している画像も消え、元に戻せません。\nよろしいですか?`)) {
+          return;
+        }
         del.disabled = true;
         try {
           await callApi(`/api/entries/${entry.id}`, { method: 'DELETE' });
           await refresh();
         } catch (err) {
           del.disabled = false;
+          alert('削除できませんでした。通信状況を確認してください');
         }
       });
       action.append(del);
@@ -489,6 +549,11 @@
 
   function renderDisplay(display) {
     const showingResults = display.mode === 'results';
+    updatesEnabled = display.updates_enabled !== false;
+    lockBtn.textContent = updatesEnabled ? '更新を無効にする' : '更新を有効にする';
+    lockNote.hidden = updatesEnabled;
+    advanceBtn.disabled = !updatesEnabled;
+    clearBtn.disabled = !updatesEnabled;
     slotCountHint.textContent = String(display.slot_count);
     advanceBtn.textContent = `結果画面に移行（次の${display.slot_count}人）`;
     // 今どちらの画面が出ているかを取り違えないよう、状態をそのまま出す
@@ -540,6 +605,30 @@
     renderStatus(statusData);
   }
 
+  // 閲覧ブースの更新を受け付けるかどうか。サーバーの値で毎回上書きする
+  let updatesEnabled = true;
+
+  lockBtn.addEventListener('click', async () => {
+    const next = !updatesEnabled;
+    const question = next
+      ? '閲覧ブースの更新を有効にします。よろしいですか?'
+      : '閲覧ブースの更新を無効にします。\n以後「結果画面に移行」「待機画面に移行」は受け付けません。\nよろしいですか?';
+    if (!confirm(question)) return;
+
+    lockBtn.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/display/updates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next })
+      }));
+    } catch (err) {
+      alert('切り替えられませんでした。通信状況を確認してください');
+    } finally {
+      lockBtn.disabled = false;
+    }
+  });
+
   advanceBtn.addEventListener('click', async () => {
     advanceBtn.disabled = true;
     try {
@@ -582,6 +671,39 @@
   });
 
   reloadBtn.addEventListener('click', refresh);
+
+  // ---- 各欄の開閉 ----
+  // どれを開いていたかを端末に覚えさせる。画面を再読み込みしても戻らない。
+  const PANEL_STORAGE_KEY = 'aging-staff-panels';
+
+  function restorePanels() {
+    let closed = [];
+    try {
+      closed = JSON.parse(localStorage.getItem(PANEL_STORAGE_KEY) || '[]');
+    } catch (err) {
+      return;
+    }
+    if (!Array.isArray(closed)) return;
+    for (const panel of document.querySelectorAll('.panel[data-panel]')) {
+      panel.open = !closed.includes(panel.dataset.panel);
+    }
+  }
+
+  function savePanels() {
+    try {
+      const closed = [...document.querySelectorAll('.panel[data-panel]')]
+        .filter((panel) => !panel.open)
+        .map((panel) => panel.dataset.panel);
+      localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(closed));
+    } catch (err) {
+      // 保存できなくても、そのセッション中の開閉は効く
+    }
+  }
+
+  for (const panel of document.querySelectorAll('.panel[data-panel]')) {
+    panel.addEventListener('toggle', savePanels);
+  }
+  restorePanels();
 
   startHeartbeat('staff');
   refresh();

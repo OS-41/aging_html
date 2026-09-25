@@ -273,6 +273,10 @@ let displayUpdatedAtMs = null;
 // 'waiting' は背景の演出だけ、'results' は結果の区画を並べる。
 let displayMode = 'waiting';
 
+// 閲覧ブースの入れ替えを受け付けるか。無効にすると advance / clear を拒む。
+// 会場での調整中に誤って画面を変えてしまうのを防ぐための鍵。
+let displayUpdatesEnabled = true;
+
 // 閲覧ブースの待機演出の絵柄。係員画面から切り替える(仮運用)
 const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook', 'tamatebako'];
 let displayTheme = 'realistic';
@@ -400,6 +404,7 @@ function currentDisplay() {
     slot_count: DISPLAY_SLOT_COUNT,
     updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
     mode: displayMode,
+    updates_enabled: displayUpdatesEnabled,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
     entries
@@ -763,6 +768,11 @@ router.get('/api/display', requireBasicAuth, (req, res) => {
  * 閲覧ブースを結果画面に切り替える(係員の「結果画面に移行」)。
  */
 router.post('/api/display/advance', requireBasicAuth, (req, res) => {
+  if (!displayUpdatesEnabled) {
+    addLog({ level: 'warn', event: 'display:locked', message: '更新が無効のため結果画面に移行できません' });
+    return res.status(409).json({ error: '閲覧ブースの更新が無効になっています', ...currentDisplay() });
+  }
+
   const next = entriesInOrder()
     .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
     .slice(0, DISPLAY_SLOT_COUNT);
@@ -809,10 +819,35 @@ router.post('/api/display/theme', requireBasicAuth, (req, res) => {
  * 待機画面では背景の演出だけを映し、結果の区画は出さない。
  */
 router.post('/api/display/clear', requireBasicAuth, (req, res) => {
+  if (!displayUpdatesEnabled) {
+    addLog({ level: 'warn', event: 'display:locked', message: '更新が無効のため待機画面に移行できません' });
+    return res.status(409).json({ error: '閲覧ブースの更新が無効になっています', ...currentDisplay() });
+  }
+
   displayBatch = [];
   displayUpdatedAtMs = Date.now();
   displayMode = 'waiting';
   addLog({ event: 'display:clear', message: '待機画面に移行' });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/display/updates
+ * 閲覧ブースの入れ替えを受け付けるかを切り替える(係員用)。
+ * body: { "enabled": true | false }
+ */
+router.post('/api/display/updates', requireBasicAuth, (req, res) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled には true か false を指定してください' });
+  }
+
+  displayUpdatesEnabled = enabled;
+  addLog({
+    level: enabled ? 'info' : 'warn',
+    event: 'display:updates',
+    message: enabled ? '閲覧ブースの更新を有効化' : '閲覧ブースの更新を無効化'
+  });
   res.json(currentDisplay());
 });
 

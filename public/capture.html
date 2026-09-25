@@ -101,6 +101,17 @@
     color: var(--muted);
     margin: 0;
   }
+  /* 係員向け。来場者の邪魔をしない大きさで、実際のエラー内容を出す */
+  .failure-detail {
+    margin: 12px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+    word-break: break-all;
+  }
 </style>
 </head>
 <body>
@@ -130,6 +141,8 @@
       <p class="failure-title" id="failureReason">もう一度撮影してください</p>
       <p class="failure-reason">もう一度撮影してください</p>
       <p class="failure-note">続けて失敗する場合は係員をお呼びください</p>
+      <!-- 係員が原因を切り分けるための実際のエラー内容 -->
+      <p class="failure-detail" id="failureDetail" hidden></p>
     </div>
 
     <div class="receipt" id="receipt" hidden>
@@ -190,6 +203,7 @@
   const workingText = document.getElementById('workingText');
   const failure = document.getElementById('failure');
   const failureReason = document.getElementById('failureReason');
+  const failureDetail = document.getElementById('failureDetail');
   const receipt = document.getElementById('receipt');
   const receiptNumber = document.getElementById('receiptNumber');
   const sentCount = document.getElementById('sentCount');
@@ -206,6 +220,7 @@
    * ここに無いコードや、コードが取れなかった場合は汎用の案内を出す。
    */
   const FACE_ERROR_MESSAGES = {
+    // --- 立ち位置と顔の向き(公式ドキュメントの Error Code) ---
     error_below_min_image_size: '写真が小さすぎます。係員をお呼びください',
     error_face_position_invalid: 'お顔全体がまっすぐ中央に写るようにしてください',
     error_face_position_too_small: 'もう少しカメラに近づいてください',
@@ -216,7 +231,36 @@
     error_face_angle_leftward: '顔が左を向きすぎています。少し右を向いてください',
     error_face_angle_rightward: '顔が右を向きすぎています。少し左を向いてください',
     error_face_angle_left_tilt: '頭が左に傾いています。少し右に傾けてください',
-    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください'
+    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください',
+
+    // --- 撮り直しで直せるもの(General Error Code) ---
+    error_no_face: 'お顔が写っていません。カメラの正面に立ってください',
+    error_multiple_people: 'お一人ずつ撮影してください',
+    error_no_shoulder: '肩まで写るように、少し下がってください',
+    error_large_face_angle: '顔の向きが大きすぎます。カメラをまっすぐ見てください',
+    error_pose: '姿勢を認識できませんでした。正面を向いて立ってください',
+    error_face_parsing: 'お顔を認識できませんでした。もう一度撮影してください',
+    error_decode_image: '写真を読み取れませんでした。もう一度撮影してください',
+    error_nsfw_content_detected: 'うまく認識できませんでした。もう一度撮影してください',
+    exceed_nsfw_retry_limits: 'うまく生成できませんでした。もう一度撮影してください',
+
+    // --- もう一度試せば直る見込みがあるもの ---
+    error_download_image: '写真を受け渡せませんでした。もう一度お試しください',
+    error_inference: '生成に失敗しました。もう一度お試しください',
+    error_upload: '結果を保存できませんでした。もう一度お試しください',
+
+    // --- 来場者では直せないもの。係員を呼ぶ ---
+    exceed_max_filesize: '写真のデータが大きすぎます。係員をお呼びください',
+    error_unsupport_ratio: '写真の縦横比が対応していません。係員をお呼びください',
+    invalid_parameter: '設定に誤りがあります。係員をお呼びください',
+    unknown_internal_error: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_download_mask: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_decode_mask: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_download_video: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_decode_video: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_unexpected_video_duration: 'サーバー側で問題が起きました。係員をお呼びください',
+    error_hair_too_short: 'この写真では生成できませんでした。係員をお呼びください',
+    error_bald_image: 'この写真では生成できませんでした。係員をお呼びください'
   };
   const FACE_ERROR_FALLBACK = 'お顔全体がまっすぐ中央に写るようにしてください';
 
@@ -603,8 +647,9 @@
   /**
    * 撮り直しの案内を出す。来場者がまだブースにいるうちに撮り直してもらう。
    * @param {string} reason - 何が起きたのかを来場者向けの言葉で
+   * @param {string} [detail] - 係員向けに出す実際のエラー内容
    */
-  function showFailure(reason) {
+  function showFailure(reason, detail = '') {
     clearTimeout(autoResetTimer);
     capturedBlob = null;
     setWorking(null);
@@ -612,6 +657,8 @@
     receipt.hidden = true;
     failure.hidden = false;
     failureReason.textContent = reason;
+    failureDetail.textContent = detail;
+    failureDetail.hidden = !detail;
     captureBtn.hidden = true;
     sendBtn.hidden = true;
     retakeBtn.hidden = true;
@@ -756,7 +803,7 @@
       result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
       logEvent({ level: 'error', event: 'capture:send', message: `送信に失敗: ${err.message}` });
-      showFailure('うまく送れませんでした');
+      showFailure('うまく送れませんでした', `送信エラー: ${err.message}`);
       return;
     }
 
@@ -772,8 +819,13 @@
         sequence: result.sequence,
         message: failed.detail
       });
-      // 何を直せばよいかが分かるよう、APIのエラーコードを案内に読み替える
-      showFailure(FACE_ERROR_MESSAGES[failed.code] || FACE_ERROR_FALLBACK);
+      // 何を直せばよいかが分かるよう、APIのエラーコードを案内に読み替える。
+      // 表に無いコードだったことも係員が分かるよう、実際の内容を併記する。
+      const known = Object.prototype.hasOwnProperty.call(FACE_ERROR_MESSAGES, failed.code);
+      showFailure(
+        known ? FACE_ERROR_MESSAGES[failed.code] : FACE_ERROR_FALLBACK,
+        `受付 ${result.sequence} / ${failed.code ? `${failed.code}${known ? '' : '(未登録のコード)'}` : 'コードなし'}: ${failed.detail}`
+      );
       return;
     }
 
