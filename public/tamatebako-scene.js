@@ -26,9 +26,11 @@
  *   veiled   (1.2s) 完全に覆われている。この隙に背景を煙ありの絵へ替え、
  *                   結果を煙の下に置く(背景の入れ替えに0.8秒かかるため、
  *                   その間ずっと覆われたままになる長さにしてある)
- *   settling (1.6s) 煙が薄れ、下に置いてある結果が見えてくる。
- *                   ここで止まり、引いていかない
- *   done           演出の終わり。煙はそのまま漂い続ける
+ *   settling (2.2s) 煙が薄れ、下に置いてある結果が見えてくる。
+ *                   一面の層を先に引き、かたまりの煙が最後まで残る
+ *                   広がりは保ったまま(引いていかない)で、濃さだけを0にする
+ *   done           演出の終わり。煙は写真の後ろへ回り、そこで漂い続ける
+ *                   (前に出たまま残すと、結果の写真が白くかすんでしまう)
  *
  * 見せ方の要は、**煙で埋め尽くしてから背景と結果を入れ替え、煙が晴れる中で
  * 結果が現れる**こと。結果そのものを淡く出し入れはしない(view.html側でも
@@ -48,7 +50,7 @@
     ['rising', 1000],
     ['filling', 1400],
     ['veiled', 1200],
-    ['settling', 1600]
+    ['settling', 2200]
   ];
 
   // 画面を覆いきるための一面の色。かたまりの煙と同じ色味にして、
@@ -58,6 +60,10 @@
   // 写真を出しているあいだ、煙を漂わせておく濃さ。
   // かたまりが重なるため、1つあたりはかなり薄くしないと画面が白く飛ぶ。
   const SETTLED_ALPHA = 0.2;
+  // 演出のあと、漂う煙が出てくるまでの時間。
+  // 煙は settling で完全に晴らしてから、写真の後ろへ回って戻ってくる
+  // (前に出たまま残すと、写真が白くかすんでしまうため)。
+  const SETTLE_FADE_MS = 1000;
   // 待機画面へ戻すときに煙が消えるまでの時間
   const CLOSE_MS = 1200;
 
@@ -125,6 +131,8 @@
     let lastPhase = null;
     // 演出を流し終えたか。写真を出しているあいだは煙を残す
     let revealed = false;
+    // 流し終えた時刻。漂う煙をここから静かに戻す
+    let revealedAtMs = 0;
 
     /**
      * 煙のかたまりを組み立てる。1つのかたまりは重なった丸の集まりで、
@@ -257,13 +265,16 @@
         case 'veiled':
           return { spread: 1, alpha: 1, glow: 0, veil: 1 };
         // 煙が薄れ、下に置いてある結果が見えてくる。
-        // 広がりは保ったままにして、煙を引かせない
+        // 広がりは保ったままにして、煙を引かせない。
+        // ここでは完全に晴らす。漂う煙は演出のあと、写真の後ろから出し直す
         case 'settling':
           return {
             spread: 1,
-            alpha: 1 - (1 - SETTLED_ALPHA) * easeInOut(progress),
-            glow: 0,
-            veil: 1 - easeInOut(progress)
+            alpha: 1 - easeInOut(progress),
+            // 一面の層はかたまりより先に引く。両方を同じ速さで薄めると
+            // 終わりぎわまで真っ白のままで、結果が急に現れて見えるため
+            veil: 1 - easeOut(clamp01(progress / 0.55)),
+            glow: 0
           };
         default:
           return { spread: 1, alpha: SETTLED_ALPHA, glow: 0, veil: 0 };
@@ -316,7 +327,9 @@
       // 待機中は何も描かない(閉じた玉手箱は背景の絵が持っている)
       if (!playStartMs) {
         if (revealed) {
-          drawSettledSmoke(SETTLED_ALPHA, time);
+          // settling で晴らしきった煙を、写真の後ろから静かに戻す
+          const back = clamp01((nowMs - revealedAtMs) / SETTLE_FADE_MS);
+          drawSettledSmoke(SETTLED_ALPHA * back, time);
         }
         return;
       }
@@ -331,7 +344,7 @@
         playStartMs = 0;
         lastPhase = null;
         revealed = true;
-        drawSettledSmoke(SETTLED_ALPHA, time);
+        revealedAtMs = nowMs;
         return;
       }
 
@@ -400,10 +413,12 @@
         onPhase('veiled', 0);
         onPhase('done', 1);
         revealed = true;
+        revealedAtMs = performance.now() - SETTLE_FADE_MS;
         drawFrame(performance.now());
         return;
       }
       playStartMs = performance.now();
+      revealedAtMs = 0;
       lastPhase = null;
     }
 
