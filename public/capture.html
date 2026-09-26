@@ -101,6 +101,31 @@
     color: var(--muted);
     margin: 0;
   }
+  /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
+  .dev-bar {
+    margin-top: 0;
+    padding-top: 12px;
+  }
+  .dev-bar .dev-tag {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(255, 196, 0, 0.9);
+    color: #1b1b1b;
+    font-weight: 700;
+    font-size: 13px;
+  }
+
+  /* 係員向け。来場者の邪魔をしない大きさで、実際のエラー内容を出す */
+  .failure-detail {
+    margin: 12px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+    word-break: break-all;
+  }
 </style>
 </head>
 <body>
@@ -128,8 +153,10 @@
 
     <div class="failure" id="failure" hidden>
       <p class="failure-title" id="failureReason">もう一度撮影してください</p>
-      <p class="failure-reason">もう一度撮影してください</p>
-      <p class="failure-note">続けて失敗する場合は係員をお呼びください</p>
+      <p class="failure-reason" id="failureAction">もう一度撮影してください</p>
+      <p class="failure-note" id="failureNote">続けて失敗する場合は係員をお呼びください</p>
+      <!-- 係員が原因を切り分けるための実際のエラー内容 -->
+      <p class="failure-detail" id="failureDetail" hidden></p>
     </div>
 
     <div class="receipt" id="receipt" hidden>
@@ -149,6 +176,11 @@
     <div class="staff-bar">
       <span>撮影ブース</span>
       <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
+      <label>カメラ
+        <select id="cameraSelect">
+          <option value="">既定のカメラ</option>
+        </select>
+      </label>
       <label>背景
         <select id="backgroundSelect">
           <option value="image:aging_captureBackground.webp">絵本のわく</option>
@@ -163,6 +195,31 @@
       <span id="segmentState">背景合成: 準備中</span>
       <button type="button" class="quiet" id="resetBtn">次の人へ</button>
     </div>
+
+    <!--
+      開発モードのときだけ出る欄。係員画面で開発モードに入ると現れ、
+      抜けると消える。ここで選んだ状態は画面の見た目だけを変え、
+      aging APIも受付も一切動かさない。
+    -->
+    <div class="staff-bar dev-bar" id="devBar" hidden>
+      <span class="dev-tag">開発モード</span>
+      <label>表示する状態
+        <select id="devStateSelect">
+          <option value="">（選んでください）</option>
+          <optgroup label="通常の流れ">
+            <option value="flow:camera">撮影前（カメラ映像）</option>
+            <option value="flow:confirm">撮影後の確認</option>
+            <option value="flow:sending">送信中</option>
+            <option value="flow:checking">お顔の確認中</option>
+            <option value="flow:receipt">受付完了（番号）</option>
+          </optgroup>
+          <!-- 撮り直しの案内と技術的な問題は、実際の表と同じ内容から組み立てる -->
+          <optgroup label="撮り直しの案内（画像のエラー）" id="devImageGroup"></optgroup>
+          <optgroup label="技術的な問題（係員を呼ぶ）" id="devTechGroup"></optgroup>
+        </select>
+      </label>
+      <button type="button" class="quiet" id="devResetBtn">撮影画面に戻す</button>
+    </div>
   </div>
 
 <script src="common.js"></script>
@@ -173,6 +230,7 @@
   const preview = document.getElementById('preview');
   const canvas = document.getElementById('canvas');
   const backgroundSelect = document.getElementById('backgroundSelect');
+  const cameraSelect = document.getElementById('cameraSelect');
   const segmentState = document.getElementById('segmentState');
   const statusEl = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
@@ -184,10 +242,18 @@
   const workingText = document.getElementById('workingText');
   const failure = document.getElementById('failure');
   const failureReason = document.getElementById('failureReason');
+  const failureAction = document.getElementById('failureAction');
+  const failureNote = document.getElementById('failureNote');
+  const failureDetail = document.getElementById('failureDetail');
   const receipt = document.getElementById('receipt');
   const receiptNumber = document.getElementById('receiptNumber');
   const sentCount = document.getElementById('sentCount');
   const resetBtn = document.getElementById('resetBtn');
+  const devBar = document.getElementById('devBar');
+  const devStateSelect = document.getElementById('devStateSelect');
+  const devImageGroup = document.getElementById('devImageGroup');
+  const devTechGroup = document.getElementById('devTechGroup');
+  const devResetBtn = document.getElementById('devResetBtn');
 
   // 送信後、次の来場者のために自動で初期状態へ戻すまでの時間
   const AUTO_RESET_MS = 20000;
@@ -199,8 +265,8 @@
    * 公式ドキュメントの説明をそのまま指示の形にしてある。
    * ここに無いコードや、コードが取れなかった場合は汎用の案内を出す。
    */
-  const FACE_ERROR_MESSAGES = {
-    error_below_min_image_size: '写真が小さすぎます。係員をお呼びください',
+  const IMAGE_ERROR_MESSAGES = {
+    // --- 立ち位置と顔の向き(公式ドキュメントの Error Code) ---
     error_face_position_invalid: 'お顔全体がまっすぐ中央に写るようにしてください',
     error_face_position_too_small: 'もう少しカメラに近づいてください',
     error_face_position_out_of_boundary: 'お顔が画面からはみ出しています。少し下がってください',
@@ -210,9 +276,76 @@
     error_face_angle_leftward: '顔が左を向きすぎています。少し右を向いてください',
     error_face_angle_rightward: '顔が右を向きすぎています。少し左を向いてください',
     error_face_angle_left_tilt: '頭が左に傾いています。少し右に傾けてください',
-    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください'
+    error_face_angle_right_tilt: '頭が右に傾いています。少し左に傾けてください',
+
+    // --- 撮り直しで直せるもの(General Error Code) ---
+    error_no_face: 'お顔が写っていません。カメラの正面に立ってください',
+    error_multiple_people: 'お一人ずつ撮影してください',
+    error_no_shoulder: '肩まで写るように、少し下がってください',
+    error_large_face_angle: '顔の向きが大きすぎます。カメラをまっすぐ見てください',
+    error_pose: '姿勢を認識できませんでした。正面を向いて立ってください',
+    error_face_parsing: 'お顔を認識できませんでした。もう一度撮影してください',
+    error_decode_image: '写真を読み取れませんでした。もう一度撮影してください',
+    error_nsfw_content_detected: 'うまく認識できませんでした。もう一度撮影してください',
+    exceed_nsfw_retry_limits: 'うまく生成できませんでした。もう一度撮影してください'
   };
-  const FACE_ERROR_FALLBACK = 'お顔全体がまっすぐ中央に写るようにしてください';
+
+  /*
+   * 上の表に無いものはすべて「技術的な問題」として扱う。
+   *
+   * APIユニットの不足、設定の誤り、生成基盤の不調などは、来場者が姿勢を
+   * 直しても解決しない。以前は未知のコードにも「お顔全体がまっすぐ中央に
+   * 写るようにしてください」と出していたため、ユニット切れのときに
+   * 来場者が何度も撮り直す状態になっていた。
+   * 分からない失敗は、来場者に指示を出すのではなく係員を呼ぶ。
+   */
+  const TECHNICAL_TITLE = '技術的な問題が発生しました';
+  const TECHNICAL_ACTION = '係員をお呼びください';
+  const TECHNICAL_NOTE = '係員の方へ: 管理画面(/staff.html)の処理履歴で原因を確認してください';
+
+  /*
+   * 開発モードで確認できる「技術的な問題」の一覧。
+   *
+   * 表示そのものはどのコードでも同じ(技術的な問題・係員を呼ぶ)なので、
+   * ここに並べるのは係員向けの1行がどう出るかを確かめるため。文面は
+   * サーバーが実際に組み立てる形(describeAgingError)に合わせてある。
+   * 来場者向けの案内はこの表に依存しないので、コードが増えても
+   * 表示が壊れることはない。
+   */
+  const DEV_TECHNICAL_CASES = [
+    // --- タスクの依頼(POST)で返るもの ---
+    { label: 'APIのユニット不足', detail: 'タスクを開始できませんでした: APIのユニットが不足しています(追加購入が必要) / code=CreditInsufficiency / HTTP 400 / Insufficient unit to run' },
+    { label: 'リクエスト内容が不正', detail: 'タスクを開始できませんでした: リクエストの内容が不正です / code=InvalidParameters / HTTP 400 / Invalid request parameters' },
+    { label: '想定外のリクエスト', detail: 'タスクを開始できませんでした: 想定外のリクエスト内容です / code=BadRequest / HTTP 400 / Unexpected request parameter' },
+    { label: 'スタイルグループIDが不正', detail: 'タスクを開始できませんでした: スタイルグループIDが不正です / code=InvalidStyleGroup / HTTP 400 / Invalid style group id' },
+    { label: 'スタイルIDが不正', detail: 'タスクを開始できませんでした: スタイルIDが不正です / code=InvalidStyle / HTTP 400 / Invalid style id' },
+    { label: 'APIキーが無効 (401)', detail: 'タスクを開始できませんでした: APIキーが無効です / HTTP 401 / Invalid API key' },
+    { label: 'レート制限 (429)', detail: 'タスクを開始できませんでした: リクエストが多すぎます(レート制限) / HTTP 429 / Too many requests' },
+
+    // --- 進行状況の確認(GET)で返るもの ---
+    { label: 'task_idが不正 (400)', detail: 'タスクを開始できませんでした: リクエストが不正です(task_idの誤りを含む) / HTTP 400 / Invalid task ID' },
+    { label: 'API側で時間切れ (500)', detail: 'aging API側で処理が時間切れになりました / HTTP 500 / Task execution timed out' },
+
+    // --- 生成の途中で失敗したもの(来場者の姿勢では直らない) ---
+    { label: '写真が小さすぎる', detail: 'code=error_below_min_image_size' },
+    { label: '元画像を取得できない', detail: 'code=error_download_image' },
+    { label: '生成に失敗', detail: 'code=error_inference' },
+    { label: '結果を保存できない', detail: 'code=error_upload' },
+    { label: 'ファイルサイズ超過', detail: 'code=exceed_max_filesize' },
+    { label: '縦横比が非対応', detail: 'code=error_unsupport_ratio' },
+    { label: '設定値の誤り', detail: 'code=invalid_parameter' },
+    { label: '原因不明の内部エラー', detail: 'code=unknown_internal_error' },
+    { label: '髪が短すぎる', detail: 'code=error_hair_too_short' },
+    { label: '髪が写っていない', detail: 'code=error_bald_image' },
+
+    // --- API以外の失敗 ---
+    { label: '送信そのものに失敗', detail: '送信エラー: Failed to fetch' },
+    { label: '生成が時間内に終わらない', detail: '生成が時間内に完了しませんでした' },
+    { label: 'コードが取れなかった場合', detail: '写真をうまく処理できませんでした' }
+  ];
+
+  // 開発モードの見本で使う受付番号(実在しないことが分かる値)
+  const DEV_SAMPLE_SEQUENCE = 0;
 
   // 受付を送ったあと、生成が早々に失敗しないかを見張る時間。
   // aging APIが顔を認識できない場合はここで分かるので、来場者がまだ
@@ -224,6 +357,9 @@
   const CONFIRM_INTERVAL_MS = 1500;
 
   let stream = null;
+  // 使うカメラ。撮影・送信・次の人への切り替えでは変えない。
+  // 記憶の読み出しは起動処理(下部)で行う
+  let cameraId = '';
   let capturedBlob = null;
   let sent = 0;
   let autoResetTimer = null;
@@ -256,8 +392,12 @@
   const SCENE_MAX_SIDE = 960;
   // 演出の書き換えはこの間隔で十分(カメラの合成は毎フレーム行う)
   const SCENE_FRAME_MS = 1000 / 30;
-  // 「閲覧ブースに合わせる」ときに絵柄を確認する間隔
+  // サーバーの状態(絵柄・開発モード)を確認する間隔
   const THEME_POLL_MS = 5000;
+
+  // 使うカメラの記憶先。撮影のたびに選び直さずに済むよう、
+  // 端末のブラウザに残す(撮影・送信・次の人への切り替えでは消さない)。
+  const CAMERA_STORAGE_KEY = 'aging-capture-camera';
 
   const sceneCanvas = document.createElement('canvas');
   const scene = createOceanScene(sceneCanvas);
@@ -311,18 +451,24 @@
   }
 
   /**
-   * 閲覧ブースで選ばれている絵柄に合わせる。
+   * サーバーの状態を取り込む。開発モードの出入りと、「閲覧ブースに合わせる」
+   * ときの絵柄をここでまとめて反映する(問い合わせは1回で済ませる)。
    */
-  async function syncTheme() {
-    if (backgroundMode !== 'sync') return;
+  async function syncDisplay() {
+    let display;
     try {
-      const display = await callApi('/api/display');
-      const theme = SYNC_FALLBACK[display.theme] || display.theme;
-      if (scene.setTheme(theme)) {
-        logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
-      }
+      display = await callApi('/api/display');
     } catch (err) {
-      // 取得できなければ現在の絵柄のまま描き続ける
+      // 取得できなければ現在の状態のまま(絵柄も開発モードも変えない)
+      return;
+    }
+
+    setDevMode(display.dev_mode === true);
+
+    if (backgroundMode !== 'sync') return;
+    const theme = SYNC_FALLBACK[display.theme] || display.theme;
+    if (scene.setTheme(theme)) {
+      logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
     }
   }
 
@@ -454,20 +600,123 @@
     requestAnimationFrame(renderLoop);
   }
 
+  // ---- 使うカメラの選択 ----
+  // USB接続のWebカメラを使う場合、内蔵カメラが選ばれてしまうことがある。
+  // 係員が選び直せるようにし、選んだものは端末に覚えさせる。
+
+  /**
+   * 記憶しているカメラのID。読めない環境(プライベートウィンドウなど)では空。
+   */
+  function loadCameraId() {
+    try {
+      return localStorage.getItem(CAMERA_STORAGE_KEY) || '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function saveCameraId(deviceId) {
+    try {
+      if (deviceId) {
+        localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+      } else {
+        localStorage.removeItem(CAMERA_STORAGE_KEY);
+      }
+    } catch (err) {
+      // 保存できなくても、そのセッション中は選択が効いていればよい
+    }
+  }
+
+  /**
+   * 接続されているカメラを選択欄に並べる。
+   * 機器名は撮影の許可が下りるまで空になるため、カメラ開始後にも呼ぶ。
+   */
+  async function refreshCameraList() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    let devices;
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (err) {
+      return;
+    }
+
+    // 撮影の許可が下りるまで、ブラウザは deviceId を空で返す。
+    // その状態の一覧で判断すると、記憶している機器を「外れた」と
+    // 誤解して消してしまうため、IDが読めるまでは触らない。
+    const cameras = devices.filter((device) => device.kind === 'videoinput' && device.deviceId);
+    if (cameras.length === 0) return;
+
+    const options = [new Option('既定のカメラ', '')];
+    cameras.forEach((camera, index) => {
+      options.push(new Option(camera.label || `カメラ ${index + 1}`, camera.deviceId));
+    });
+    cameraSelect.replaceChildren(...options);
+
+    // 記憶していた機器がまだ繋がっていればそれを選ぶ
+    const known = cameras.some((camera) => camera.deviceId === cameraId);
+    cameraSelect.value = known ? cameraId : '';
+    if (cameraId && !known) {
+      // 機器が外れている。次回は既定のカメラに戻す
+      cameraId = '';
+      saveCameraId('');
+      logEvent({ level: 'warn', event: 'camera:missing', message: '記憶していたカメラが見つかりません' });
+    }
+  }
+
+  /**
+   * 現在のカメラを止める。選び直すときに掴みっぱなしにしないため。
+   */
+  function stopCamera() {
+    if (!stream) return;
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    stream = null;
+    video.srcObject = null;
+  }
+
   async function startCamera() {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      // 記憶した機器を要求し、外れていれば既定のカメラへ戻す
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: cameraId ? { deviceId: { exact: cameraId } } : { facingMode: 'user' }
+        });
+      } catch (err) {
+        if (!cameraId) throw err;
+        logEvent({ level: 'warn', event: 'camera:fallback', message: `選択中のカメラを使えません: ${err.message}` });
+        cameraId = '';
+        saveCameraId('');
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      }
+
       video.srcObject = stream;
       await video.play().catch(() => {});
       showInStage('camera');
       startBtn.hidden = true;
       captureBtn.disabled = false;
       setStatus('正面を向いて「撮影する」を押してください');
+      // 許可が下りたので、ここで初めて機器名が読める
+      await refreshCameraList();
     } catch (err) {
       setStatus('カメラを使用できません。係員をお呼びください', 'error');
       logEvent({ level: 'error', event: 'camera:failed', message: err.message });
     }
   }
+
+  cameraSelect.addEventListener('change', async () => {
+    cameraId = cameraSelect.value;
+    saveCameraId(cameraId);
+    logEvent({ event: 'camera:selected', message: cameraSelect.selectedOptions[0]?.textContent || '既定のカメラ' });
+    if (!stream) return;
+    // 開いている最中なら、その場で繋ぎ直す
+    stopCamera();
+    captureBtn.disabled = true;
+    await startCamera();
+  });
+
+  // 機器の抜き差しに追従する
+  navigator.mediaDevices?.addEventListener?.('devicechange', refreshCameraList);
 
   backgroundSelect.addEventListener('change', () => applyBackgroundMode(backgroundSelect.value));
 
@@ -486,22 +735,61 @@
 
   /**
    * 撮り直しの案内を出す。来場者がまだブースにいるうちに撮り直してもらう。
-   * @param {string} reason - 何が起きたのかを来場者向けの言葉で
+   * @param {string} instruction - 何を直せばよいかを来場者向けの言葉で
+   * @param {string} [detail] - 係員向けに出す実際のエラー内容
    */
-  function showFailure(reason) {
+  function showImageFailure(instruction, detail = '') {
+    showFailure({
+      title: instruction,
+      action: 'もう一度撮影してください',
+      note: '続けて失敗する場合は係員をお呼びください',
+      status: 'もう一度撮影してください',
+      detail
+    });
+  }
+
+  /**
+   * 来場者では直せない失敗の案内。姿勢の指示は出さず、係員を呼んでもらう。
+   * @param {string} [detail] - 係員向けに出す実際のエラー内容
+   */
+  function showTechnicalFailure(detail = '') {
+    logEvent({ level: 'error', event: 'capture:technical', message: detail || '技術的な問題' });
+    showFailure({
+      title: TECHNICAL_TITLE,
+      action: TECHNICAL_ACTION,
+      note: TECHNICAL_NOTE,
+      status: '係員をお呼びください',
+      detail
+    });
+  }
+
+  /**
+   * 失敗の案内を出す共通処理。
+   * @param {object} options
+   * @param {string} options.title - 大きく出す1行
+   * @param {string} options.action - 次にしてほしいこと
+   * @param {string} options.note - 補足
+   * @param {string} options.status - 画面上部のステータス行
+   * @param {string} [options.detail] - 係員向けの実際のエラー内容
+   */
+  function showFailure({ title, action, note, status, detail = '' }) {
     clearTimeout(autoResetTimer);
     capturedBlob = null;
     setWorking(null);
     stage.hidden = true;
     receipt.hidden = true;
     failure.hidden = false;
-    failureReason.textContent = reason;
+    failureReason.textContent = title;
+    failureAction.textContent = action;
+    failureNote.textContent = note;
+    failureDetail.textContent = detail;
+    failureDetail.hidden = !detail;
     captureBtn.hidden = true;
     sendBtn.hidden = true;
     retakeBtn.hidden = true;
     retryBtn.hidden = false;
     retryBtn.disabled = !stream;
-    setStatus('もう一度撮影してください', 'error');
+    setStatus(status, 'error');
     // 来場者がその場を離れても、次の人のために撮影画面へ戻る
     autoResetTimer = setTimeout(resetToCamera, FAILURE_RESET_MS);
   }
@@ -526,6 +814,165 @@
     retakeBtn.disabled = false;
     setStatus(stream ? '正面を向いて「撮影する」を押してください' : '「カメラを開始」を押してください');
   }
+
+  // ---- 開発モード ----
+  // 係員画面で開発モードに入っている間だけ、表示する状態を選べるようにする。
+  // aging APIのユニットが尽きている間でも、各状態の見た目を確認できる。
+  // 選んでも受付は作らず、写真も送らない(画面の見た目だけを変える)。
+
+  let devMode = false;
+
+  /**
+   * 状態を選ぶ欄の中身を、実際のエラー表から組み立てる。
+   * 表に手を入れたら選択肢も自動で増える。
+   */
+  function buildDevStateOptions() {
+    devImageGroup.replaceChildren(...Object.entries(IMAGE_ERROR_MESSAGES).map(([code, instruction]) => {
+      const option = document.createElement('option');
+      option.value = `image:${code}`;
+      option.textContent = `${instruction}（${code}）`;
+      return option;
+    }));
+
+    devTechGroup.replaceChildren(...DEV_TECHNICAL_CASES.map((item, index) => {
+      const option = document.createElement('option');
+      option.value = `tech:${index}`;
+      option.textContent = item.label;
+      return option;
+    }));
+  }
+
+  /**
+   * 開発モードの出入りを画面に反映する。
+   * 抜けるときは見本の状態を残さず、撮影画面に戻す。
+   * @param {boolean} on
+   */
+  function setDevMode(on) {
+    if (on === devMode) return;
+    devMode = on;
+    devBar.hidden = !on;
+    logEvent({
+      level: on ? 'warn' : 'info',
+      event: 'dev:mode',
+      message: on ? '開発モードの操作欄を表示' : '開発モードを終了し撮影画面に戻した'
+    });
+    if (!on) {
+      devStateSelect.value = '';
+      resetToCamera();
+    }
+  }
+
+  /**
+   * 今映っている合成映像を写真の面に写す。撮影前の見た目を借りて、
+   * 「写真の上に処理中のおおいが出ている」状態を再現するため。
+   * @returns {boolean} 写せたか(カメラ未開始なら false)
+   */
+  function devCopyPreview() {
+    if (!preview.width || !preview.height) return false;
+    canvas.width = preview.width;
+    canvas.height = preview.height;
+    canvas.getContext('2d').drawImage(preview, 0, 0);
+    return true;
+  }
+
+  /**
+   * 撮影後の確認の状態。送信はできない(見本の写真しか無いため)。
+   */
+  function devShowConfirm() {
+    setWorking(null);
+    failure.hidden = true;
+    receipt.hidden = true;
+    stage.hidden = false;
+    showInStage(devCopyPreview() ? 'canvas' : 'camera');
+    captureBtn.hidden = true;
+    retryBtn.hidden = true;
+    sendBtn.hidden = false;
+    retakeBtn.hidden = false;
+    sendBtn.disabled = false;
+    retakeBtn.disabled = false;
+    setStatus('この写真でよろしければ「この写真を送る」を押してください');
+  }
+
+  /**
+   * 処理中の状態。
+   * @param {string} text - おおいに出す文言
+   */
+  function devShowWorking(text) {
+    failure.hidden = true;
+    receipt.hidden = true;
+    stage.hidden = false;
+    showInStage(devCopyPreview() ? 'canvas' : 'camera');
+    captureBtn.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    retryBtn.hidden = true;
+    setWorking(text);
+    setStatus('そのままお待ちください');
+  }
+
+  /**
+   * 受付が済んだ状態。番号は見本の値。
+   */
+  function devShowReceipt() {
+    setWorking(null);
+    failure.hidden = true;
+    stage.hidden = true;
+    receipt.hidden = false;
+    receiptNumber.textContent = '123';
+    captureBtn.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    retryBtn.hidden = true;
+    setStatus('受け付けました。次の場所へお進みください', 'done');
+  }
+
+  /**
+   * 選ばれた状態を画面に出す。
+   * 失敗の表示は自動で撮影画面へ戻るが、確認の途中で消えると困るので、
+   * 開発モードで出したものは戻さない。
+   * @param {string} value - devStateSelect の値
+   */
+  function applyDevState(value) {
+    if (!value) return;
+    const separator = value.indexOf(':');
+    const kind = value.slice(0, separator);
+    const name = value.slice(separator + 1);
+
+    if (kind === 'flow') {
+      if (name === 'camera') resetToCamera();
+      if (name === 'confirm') devShowConfirm();
+      if (name === 'sending') devShowWorking('写真を送っています');
+      if (name === 'checking') devShowWorking('お顔を確認しています');
+      if (name === 'receipt') devShowReceipt();
+    } else if (kind === 'image') {
+      // 実際の表示と同じ経路を通す。係員向けの1行もサーバーが出す形に合わせる
+      showImageFailure(
+        IMAGE_ERROR_MESSAGES[name],
+        `受付 ${DEV_SAMPLE_SEQUENCE} / ${name}: code=${name}（開発モードの見本）`
+      );
+    } else if (kind === 'tech') {
+      const item = DEV_TECHNICAL_CASES[Number(name)];
+      if (!item) return;
+      // showTechnicalFailure は処理履歴に異常として残すため、
+      // 見本の確認では同じ表示だけを出して履歴は汚さない
+      showFailure({
+        title: TECHNICAL_TITLE,
+        action: TECHNICAL_ACTION,
+        note: TECHNICAL_NOTE,
+        status: '係員をお呼びください',
+        detail: `受付 ${DEV_SAMPLE_SEQUENCE} / ${item.detail}（開発モードの見本）`
+      });
+    }
+
+    // 見本は消さずに残す
+    clearTimeout(autoResetTimer);
+  }
+
+  devStateSelect.addEventListener('change', () => applyDevState(devStateSelect.value));
+  devResetBtn.addEventListener('click', () => {
+    devStateSelect.value = '';
+    resetToCamera();
+  });
 
   /**
    * 受付を送ったあと、生成が早々に失敗しないかを短い間だけ見張る。
@@ -587,9 +1034,12 @@
   }
 
   startHeartbeat('capture');
+  cameraId = loadCameraId();
+  refreshCameraList();
   applyBackgroundMode(backgroundSelect.value);
-  syncTheme();
-  setInterval(syncTheme, THEME_POLL_MS);
+  buildDevStateOptions();
+  syncDisplay();
+  setInterval(syncDisplay, THEME_POLL_MS);
   setupSegmentation();
   renderLoop();
 
@@ -638,7 +1088,7 @@
       result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
       logEvent({ level: 'error', event: 'capture:send', message: `送信に失敗: ${err.message}` });
-      showFailure('うまく送れませんでした');
+      showTechnicalFailure(`送信エラー: ${err.message}`);
       return;
     }
 
@@ -654,8 +1104,15 @@
         sequence: result.sequence,
         message: failed.detail
       });
-      // 何を直せばよいかが分かるよう、APIのエラーコードを案内に読み替える
-      showFailure(FACE_ERROR_MESSAGES[failed.code] || FACE_ERROR_FALLBACK);
+      // 撮り直しで直るコードなら指示を、それ以外は技術的な問題として扱う。
+      // 係員が原因を追えるよう、実際のコードと内容は必ず併記する。
+      const fixable = Object.prototype.hasOwnProperty.call(IMAGE_ERROR_MESSAGES, failed.code);
+      const detail = `受付 ${result.sequence} / ${failed.code || 'コードなし'}: ${failed.detail}`;
+      if (fixable) {
+        showImageFailure(IMAGE_ERROR_MESSAGES[failed.code], detail);
+      } else {
+        showTechnicalFailure(detail);
+      }
       return;
     }
 

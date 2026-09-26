@@ -244,12 +244,26 @@ let entrySequence = 0;
 // 滞留するのは「移動時間 × 撮影ペース」の分だけなので、10分運用なら
 // 数十件程度。余裕をみた上限と、閉場後に残さないための保持期間を設ける。
 const MAX_ENTRIES = 300;
-const ENTRY_TTL_MS = 60 * 60 * 1000; // 60分
+const ENTRY_TTL_MS = 30 * 60 * 1000; // 30分
 const RESULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 
 // 閲覧ブースの画面は職員が任意のタイミングでまとめて入れ替える。
 // 一度に何人分を並べるかはここで決める。
 const DISPLAY_SLOT_COUNT = 6;
+
+/*
+ * 取り込む結果画像の年齢。
+ *
+ * aging APIは複数の年齢を返すが、閲覧ブースで見せるのは1枚だけなので、
+ * その1枚しか取り込まない。ディスクと取り込み時間が枚数ぶん減り、
+ * 1枚でも取得に失敗すると受付ごと失敗する範囲も狭くなる。
+ *
+ * `public/view.html` の DISPLAY_AGE と合わせること。
+ * **null にすると、APIが返した全年齢を取り込む(以前の動作)。**
+ * 表示する年齢を後から変えたくなったとき、または複数年齢を見せる仕様に
+ * 戻すときは、ここを null にすれば保存側は元に戻る。
+ */
+const SAVED_RESULT_AGE = 70;
 
 // 現在、閲覧ブースに映している受付ID
 let displayBatch = [];
@@ -259,9 +273,40 @@ let displayUpdatedAtMs = null;
 // 'waiting' は背景の演出だけ、'results' は結果の区画を並べる。
 let displayMode = 'waiting';
 
+// 閲覧ブースの入れ替えを受け付けるか。無効にすると advance / clear を拒む。
+// 会場での調整中に誤って画面を変えてしまうのを防ぐための鍵。
+let displayUpdatesEnabled = true;
+
 // 閲覧ブースの待機演出の絵柄。係員画面から切り替える(仮運用)
 const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook', 'tamatebako'];
 let displayTheme = 'realistic';
+
+/*
+ * ---- 開発モード ----
+ *
+ * aging APIのユニットが尽きている間や、会場の設営中でまだ誰も撮影して
+ * いない間でも、各画面の見た目と切り替えを確認できるようにするための状態。
+ * 係員画面から入り、次の二つだけが変わる。
+ *
+ *  - 有効な撮影結果が無くても、結果画面を見本の画像で埋められる
+ *  - 撮影ブースに、表示する状態を選ぶ欄が出る(撮影ブース側だけの表示)
+ *
+ * 見本の画像はサーバーが生成するSVGで、aging APIは一切呼ばない。
+ * 本番中に入ったままにならないよう、係員画面と閲覧ブースの両方に
+ * 開発モードである旨を出す。
+ */
+let devMode = false;
+
+// 結果画面のうち、見本で埋めている区画の数(開発モードのときだけ0より大きい)
+let displayPlaceholders = 0;
+
+// 見本画像の寸法。よくあるWebカメラのフレーム(4:3)に合わせてある。
+// 閲覧ブースは最初に届いた画像の縦横比で区画を組み直すため、見本でも
+// 本番に近い並びが確認できる。
+const DEV_PLACEHOLDER_SIZE = { width: 1440, height: 1080 };
+
+// 見本の区画をひと目で見分けられるよう、順番に色を変える
+const DEV_PLACEHOLDER_COLORS = ['#2f4858', '#33658a', '#55828b', '#7a5c61', '#86644b', '#4f6457'];
 
 // ---- 処理履歴 ----
 // 係員が会場でトラブルを追えるよう、サーバーの処理とクライアント(各ブースの
@@ -301,12 +346,14 @@ const SERVER_STARTED_AT_MS = Date.now();
 /**
  * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
  *
- * サーバー側の記録はすべてここを通し、係員画面の処理履歴に出す。
- * ただし警告と異常だけはホスティング側のログにも流す。処理履歴は
- * メモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
- * 係員画面自体が開けないため。
+ * サーバー側の記録はすべてここを通す。console.log は使わない。
+ *
+ * 警告と異常、および echo を指定したものは、ホスティング側のログにも流す。
+ * 処理履歴はメモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
+ * 係員画面自体が開けないため、そこだけは二重に残す。
+ * @param {boolean} [options.echo] - infoでもホスティング側のログに出すか
  */
-function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null }) {
+function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null, echo = false }) {
   logSequence += 1;
   logStore.push({
     id: logSequence,
@@ -322,9 +369,14 @@ function addLog({ source = 'server', level = 'info', event, message = '', status
     logStore.splice(0, logStore.length - MAX_LOG_ENTRIES);
   }
 
-  if (level === 'warn' || level === 'error') {
+  if (echo || level === 'warn' || level === 'error') {
     const label = sequence ? `[${event} #${sequence}]` : `[${event}]`;
-    console.error(`${label} ${message}${status ? ` (status ${status})` : ''}`);
+    const line = `${label} ${message}${status ? ` (status ${status})` : ''}`;
+    if (level === 'warn' || level === 'error') {
+      console.error(line);
+    } else {
+      console.info(line);
+    }
   }
 }
 
@@ -367,7 +419,37 @@ function entriesInOrder() {
 }
 
 /**
+ * 開発モードで結果画面を埋めるための見本を、閲覧ブースに渡す形で作る。
+ * 実体は無く、画像だけを /api/dev/placeholder/:index が返す。
+ * @param {number} index - 0から始まる区画の位置
+ */
+function placeholderEntry(index) {
+  const at = new Date(displayUpdatedAtMs || Date.now()).toISOString();
+  return {
+    id: `dev-placeholder-${index}`,
+    sequence: index + 1,
+    status: 'ready',
+    error: null,
+    error_code: null,
+    // 閲覧ブースがこれを見て「見本」と分かるようにする
+    placeholder: true,
+    files: [],
+    captured_at: at,
+    viewed_at: at,
+    age: null,
+    age_idx: null,
+    age_min: null,
+    age_max: null,
+    outputs: [{
+      res_age: SAVED_RESULT_AGE === null ? 70 : SAVED_RESULT_AGE,
+      url: `${BASE_PATH}/api/dev/placeholder/${index}`
+    }]
+  };
+}
+
+/**
  * 閲覧ブースに映している内容。期限切れで消えた受付は除いて返す。
+ * 開発モードで見本を出している場合は、そのぶんを後ろに足して返す。
  */
 function currentDisplay() {
   const entries = displayBatch
@@ -375,10 +457,20 @@ function currentDisplay() {
     .filter(Boolean)
     .map(toPublicEntry);
 
+  // 見本は実際の受付の後ろに並べる。開発モードを抜けたら数が0になるので、
+  // 本番の表示に見本が混ざることはない。
+  const placeholders = devMode ? Math.min(displayPlaceholders, DISPLAY_SLOT_COUNT - entries.length) : 0;
+  for (let i = 0; i < placeholders; i++) {
+    entries.push(placeholderEntry(entries.length));
+  }
+
   return {
     slot_count: DISPLAY_SLOT_COUNT,
     updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
     mode: displayMode,
+    updates_enabled: displayUpdatesEnabled,
+    dev_mode: devMode,
+    placeholders,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
     entries
@@ -463,6 +555,45 @@ function isJpegFile(filePath) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/*
+ * aging APIが返す技術的なエラー。いずれも来場者の姿勢では直らない。
+ * 係員が「課金の問題か、設定の誤りか、鍵の問題か」を処理履歴だけで
+ * 判別できるよう、日本語の説明を添える。
+ */
+const AGING_API_ERRORS = {
+  InvalidParameters: 'リクエストの内容が不正です',
+  CreditInsufficiency: 'APIのユニットが不足しています(追加購入が必要)',
+  BadRequest: '想定外のリクエスト内容です',
+  InvalidStyleGroup: 'スタイルグループIDが不正です',
+  InvalidStyle: 'スタイルIDが不正です'
+};
+
+// 本文にコードが無く、HTTPステータスだけで分かるもの
+const AGING_API_STATUS_ERRORS = {
+  400: 'リクエストが不正です(task_idの誤りを含む)',
+  401: 'APIキーが無効です',
+  429: 'リクエストが多すぎます(レート制限)',
+  500: 'aging API側で処理が時間切れになりました'
+};
+
+/**
+ * エラーコードとHTTPステータスから、係員向けの一行を組み立てる。
+ * @param {string|null} code
+ * @param {number|null} status
+ * @param {string} message - APIが返した説明
+ */
+function describeAgingError(code, status, message) {
+  const known = code && AGING_API_ERRORS[code];
+  const byStatus = status && AGING_API_STATUS_ERRORS[status];
+  const parts = [];
+  if (known) parts.push(known);
+  else if (byStatus) parts.push(byStatus);
+  if (code) parts.push(`code=${code}`);
+  if (status) parts.push(`HTTP ${status}`);
+  if (message && message !== code) parts.push(message);
+  return parts.join(' / ');
+}
+
 /**
  * aging APIの応答からエラーコードと説明を取り出す。
  * コード(error_face_angle_upward など)は撮影ブースで来場者向けの
@@ -494,21 +625,21 @@ async function startAgingTask(srcFileUrl, sequence) {
 
   const payload = await res.json().catch(() => ({}));
   const taskId = payload?.data?.task_id;
-  recordAgingApiCall(res.status, taskId ? null : 'task_idが返りませんでした');
-  addLog({
-    level: taskId ? 'info' : 'error',
-    event: 'aging:start',
-    status: res.status,
-    sequence,
-    message: taskId ? `task_id=${taskId}` : JSON.stringify(payload).slice(0, 200)
-  });
 
   if (!taskId) {
+    // 原因を1行にまとめてから記録する。ユニット不足と鍵の誤りとレート制限は
+    // 対処がまるで違うため、係員画面でそのまま読めるようにしておく。
     const { code, message } = agingErrorFrom(payload);
-    const err = new Error(`タスクを開始できませんでした (${res.status}): ${message}`);
+    const described = describeAgingError(code, res.status, message);
+    recordAgingApiCall(res.status, described);
+    addLog({ level: 'error', event: 'aging:start', status: res.status, sequence, message: described });
+    const err = new Error(`タスクを開始できませんでした: ${described}`);
     err.code = code;
     throw err;
   }
+
+  recordAgingApiCall(res.status);
+  addLog({ event: 'aging:start', status: res.status, sequence, message: `task_id=${taskId}` });
   return taskId;
 }
 
@@ -531,7 +662,7 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
     }
     if (taskStatus === 'error') {
       const { code, message } = agingErrorFrom(payload);
-      const detail = code ? `${message} (${code})` : message;
+      const detail = describeAgingError(code, null, message);
       recordAgingApiCall(res.status, detail);
       addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
       const err = new Error(detail);
@@ -539,7 +670,14 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
       throw err;
     }
     if (!res.ok) {
-      addLog({ level: 'warn', event: 'aging:poll', status: res.status, sequence, message: `想定外の応答 (${attempt}回目)` });
+      const { code, message } = agingErrorFrom(payload);
+      addLog({
+        level: 'warn',
+        event: 'aging:poll',
+        status: res.status,
+        sequence,
+        message: `${attempt}回目: ${describeAgingError(code, res.status, message)}`
+      });
     }
 
     await sleep(intervalMs);
@@ -592,15 +730,26 @@ async function processEntry(entry, origin) {
       throw new Error('生成結果が空でした');
     }
 
+    const wanted = selectSavedOutputs(outputs);
     entry.outputs = await Promise.all(
-      outputs.map((output, index) => downloadResultImage(entry.id, index, output, entry.sequence))
+      wanted.map((output, index) => downloadResultImage(entry.id, index, output, entry.sequence))
     );
     entry.age = results.age ?? null;
-    entry.ageIdx = Number.isInteger(results.age_idx) ? results.age_idx : null;
+    // age_idx は「いまの年齢」がAPIの返した何枚目かを指す。絞り込むと
+    // 番号がずれるうえ、その1枚は取り込んでいないので持たない
+    entry.ageIdx = wanted.length === outputs.length && Number.isInteger(results.age_idx)
+      ? results.age_idx
+      : null;
     entry.ageMin = results.age_min ?? null;
     entry.ageMax = results.age_max ?? null;
     entry.status = 'ready';
-    addLog({ event: 'entry:ready', sequence: entry.sequence, message: `結果画像 ${entry.outputs.length}枚を保存` });
+    addLog({
+      event: 'entry:ready',
+      sequence: entry.sequence,
+      message: wanted.length === outputs.length
+        ? `結果画像 ${entry.outputs.length}枚を保存`
+        : `結果画像 ${entry.outputs.length}枚を保存(${outputs.length}枚中、${wanted.map((o) => `${o.res_age}歳`).join('/')})`
+    });
   } catch (err) {
     entry.status = 'error';
     entry.error = err.message;
@@ -611,6 +760,22 @@ async function processEntry(entry, origin) {
     }
     addLog({ level: 'error', event: 'entry:error', sequence: entry.sequence, message: err.message });
   }
+}
+
+/**
+ * APIが返した結果のうち、実際に取り込むものを選ぶ。
+ * SAVED_RESULT_AGE が null なら全部、そうでなければその年齢に最も近い1枚。
+ * (依頼内容によってAPIが返す年齢は変わるため、完全一致は求めない)
+ * @param {Array<{res_age: number, url: string}>} outputs
+ */
+function selectSavedOutputs(outputs) {
+  if (SAVED_RESULT_AGE === null || outputs.length === 0) {
+    return outputs;
+  }
+  const nearest = outputs.reduce((best, output) =>
+    Math.abs(output.res_age - SAVED_RESULT_AGE) < Math.abs(best.res_age - SAVED_RESULT_AGE) ? output : best
+  );
+  return [nearest];
 }
 
 /**
@@ -715,11 +880,18 @@ router.get('/api/display', requireBasicAuth, (req, res) => {
  * 閲覧ブースを結果画面に切り替える(係員の「結果画面に移行」)。
  */
 router.post('/api/display/advance', requireBasicAuth, (req, res) => {
+  if (!displayUpdatesEnabled) {
+    addLog({ level: 'warn', event: 'display:locked', message: '更新が無効のため結果画面に移行できません' });
+    return res.status(409).json({ error: '閲覧ブースの更新が無効になっています', ...currentDisplay() });
+  }
+
   const next = entriesInOrder()
     .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
     .slice(0, DISPLAY_SLOT_COUNT);
 
-  if (next.length === 0) {
+  // 開発モードでは、足りないぶんを見本で埋めて結果画面を出せる。
+  // 通常は1件も無ければ何もしない(誤って空の結果画面を出さないため)。
+  if (next.length === 0 && !devMode) {
     addLog({ level: 'warn', event: 'display:advance', message: '表示できる受付がありませんでした' });
     return res.status(409).json({ error: '表示できる受付がありません', ...currentDisplay() });
   }
@@ -729,12 +901,15 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     entry.viewedAtMs = now;
   }
   displayBatch = next.map((entry) => entry.id);
+  displayPlaceholders = devMode ? DISPLAY_SLOT_COUNT - next.length : 0;
   displayUpdatedAtMs = now;
   displayMode = 'results';
 
+  const shown = next.length > 0 ? `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示` : '受付なし';
   addLog({
+    level: displayPlaceholders > 0 ? 'warn' : 'info',
     event: 'display:advance',
-    message: `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示`
+    message: displayPlaceholders > 0 ? `${shown}(開発モード: 見本 ${displayPlaceholders}件を追加)` : shown
   });
   res.json(currentDisplay());
 });
@@ -761,11 +936,98 @@ router.post('/api/display/theme', requireBasicAuth, (req, res) => {
  * 待機画面では背景の演出だけを映し、結果の区画は出さない。
  */
 router.post('/api/display/clear', requireBasicAuth, (req, res) => {
+  if (!displayUpdatesEnabled) {
+    addLog({ level: 'warn', event: 'display:locked', message: '更新が無効のため待機画面に移行できません' });
+    return res.status(409).json({ error: '閲覧ブースの更新が無効になっています', ...currentDisplay() });
+  }
+
   displayBatch = [];
+  displayPlaceholders = 0;
   displayUpdatedAtMs = Date.now();
   displayMode = 'waiting';
   addLog({ event: 'display:clear', message: '待機画面に移行' });
   res.json(currentDisplay());
+});
+
+/**
+ * POST /api/display/updates
+ * 閲覧ブースの入れ替えを受け付けるかを切り替える(係員用)。
+ * body: { "enabled": true | false }
+ */
+router.post('/api/display/updates', requireBasicAuth, (req, res) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled には true か false を指定してください' });
+  }
+
+  displayUpdatesEnabled = enabled;
+  addLog({
+    level: enabled ? 'info' : 'warn',
+    event: 'display:updates',
+    message: enabled ? '閲覧ブースの更新を有効化' : '閲覧ブースの更新を無効化'
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/dev
+ * 開発モードの出入り(係員用)。
+ * 抜けるときは、出していた見本をその場で片付ける。
+ * body: { "enabled": true | false }
+ */
+router.post('/api/dev', requireBasicAuth, (req, res) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled には true か false を指定してください' });
+  }
+
+  devMode = enabled;
+  if (!devMode && displayPlaceholders > 0) {
+    // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
+    displayPlaceholders = 0;
+    if (displayBatch.length === 0) {
+      displayMode = 'waiting';
+    }
+    displayUpdatedAtMs = Date.now();
+  }
+
+  addLog({
+    level: enabled ? 'warn' : 'info',
+    event: 'dev:mode',
+    message: enabled ? '開発モードに移行(見本での表示を許可)' : '開発モードを終了'
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * GET /api/dev/placeholder/:index
+ * 開発モードで結果画面を埋める見本画像。SVGをその場で組んで返すため、
+ * aging APIもディスクも使わない。開発モードでないときは返さない。
+ */
+router.get('/api/dev/placeholder/:index', requireBasicAuth, (req, res) => {
+  if (!devMode) {
+    return res.status(409).json({ error: '開発モードではありません' });
+  }
+
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0 || index >= DISPLAY_SLOT_COUNT) {
+    return res.status(404).json({ error: '見本の番号が範囲外です' });
+  }
+
+  const { width, height } = DEV_PLACEHOLDER_SIZE;
+  const color = DEV_PLACEHOLDER_COLORS[index % DEV_PLACEHOLDER_COLORS.length];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+    + `<rect width="${width}" height="${height}" fill="${color}"/>`
+    + `<rect x="24" y="24" width="${width - 48}" height="${height - 48}" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="8" stroke-dasharray="32 24"/>`
+    + `<text x="50%" y="42%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.22)}" font-weight="bold" fill="#ffffff">${index + 1}</text>`
+    + `<text x="50%" y="60%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.075)}" fill="#ffffff" fill-opacity="0.9">開発モードの見本</text>`
+    + `<text x="50%" y="70%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.05)}" fill="#ffffff" fill-opacity="0.75">${width} × ${height}</text>`
+    + '</svg>';
+
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(svg);
 });
 
 /**
@@ -1112,10 +1374,13 @@ app.use(BASE_PATH || '/', router);
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
 // Bad Gatewayになるケースを避ける。
 app.listen(PORT, '0.0.0.0', () => {
-  // 起動の一報だけはホスティング側のログに出す。この時点では
-  // 係員画面をまだ開けないため。
-  console.log(`サーバーが起動しました: http://localhost:${PORT}${BASE_PATH || ''}/`);
-  // 処理履歴の先頭にも残す。再起動すると受付中の写真と結果が消えるため、
+  // 処理履歴の先頭に残す。再起動すると受付中の写真と結果が消えるため、
   // 係員が「なぜ番号が出てこないのか」を追えるようにしておく。
-  addLog({ event: 'server:start', message: `サーバーを起動しました(保管中の受付と結果は初期化されています)` });
+  // echo でホスティング側のログにも出す。起動した事実と待ち受けポートは、
+  // 係員画面を開けないうちに確認したい唯一の情報のため。
+  addLog({
+    event: 'server:start',
+    echo: true,
+    message: `http://localhost:${PORT}${BASE_PATH || ''}/ で待ち受け開始(保管中の受付と結果は初期化されています)`
+  });
 });
