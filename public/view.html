@@ -209,11 +209,15 @@
     background-size: cover;
     background-repeat: no-repeat;
     opacity: 0;
-    transition: opacity 1.1s ease;
+    /* 入れ替えは早めに済ませる。ふたを開けた絵をしばらく見せたいため */
+    transition: opacity 0.8s ease;
   }
   #backdrop .layer.is-on { opacity: 1; }
   #backdrop .layer[data-layer="closed"] {
     background-image: url('backgrounds/aging_viewBackground_closed.jpg');
+  }
+  #backdrop .layer[data-layer="opened"] {
+    background-image: url('backgrounds/aging_viewBackground_opened.jpg');
   }
   #backdrop .layer[data-layer="smoke"] {
     background-image: url('backgrounds/aging_viewBackground.jpg');
@@ -297,7 +301,9 @@
   <div id="backdrop">
     <!-- ふたが閉じた状態。待機中はこれを映す -->
     <div class="layer" data-layer="closed"></div>
-    <!-- ふたが開いて煙が出た状態。演出のあいだはこれ -->
+    <!-- ふたを開けた直後。まだ煙は立っていない -->
+    <div class="layer" data-layer="opened"></div>
+    <!-- 煙が出た状態。ここからは演出が終わるまでこれ -->
     <div class="layer" data-layer="smoke"></div>
   </div>
   <canvas id="ocean"></canvas>
