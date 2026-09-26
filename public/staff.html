@@ -6,6 +6,9 @@
 <title>係員用 運用画面</title>
 <link rel="stylesheet" href="booth.css">
 <style>
+  /* 詳細の背景。表の行より一段沈んだ色 */
+  :root { --surface-sunk: #171b20; }
+
   /* 係員は座って手元で操作するため、ブース画面より情報密度を上げる */
   body {
     font-size: 15px;
@@ -18,47 +21,70 @@
     align-items: stretch;
   }
 
-  /* 左半分に操作と一覧、右半分に処理履歴を大きく置く */
+  /*
+   * 欄は2列の枠に並べ、係員が使う順に並べ替えられるようにする。
+   * 高さは中身に合わせるので、欄の数や開閉によって2段でも3段でもなる。
+   * 位置の目印(.drop-mark)をこの中に重ねるため position: relative。
+   */
   .console {
     flex: 1;
+    position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: auto 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
     gap: 16px;
     min-height: 0;
   }
-  .console > .col-left {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    min-height: 0;
-  }
-  .console > .col-right {
-    grid-column: 2;
-    grid-row: 1 / span 2;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .col-right .panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .col-right .table-scroll {
-    flex: 1;
-    max-height: none;
-  }
-  /* 画面が狭いときは縦に積む */
+  .console > .panel { align-self: start; }
+  /* 画面が狭いときは1列に積む */
   @media (max-width: 1100px) {
-    .console {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto;
-    }
-    .console > .col-right { grid-column: 1; grid-row: auto; }
-    .col-right .table-scroll { max-height: 420px; }
+    .console { grid-template-columns: 1fr; }
   }
+
+  /* 表の高さは欄ごとに決める(どこに置かれても同じ高さで収まるように) */
+  [data-panel="clients"] .table-scroll { max-height: 200px; }
+  [data-panel="storage"] .table-scroll { max-height: 44vh; }
+  [data-panel="logs"] .table-scroll { max-height: 58vh; }
+
+  /* ---- 欄の並べ替え ---- */
+  /* つまみを持って動かす。見出しを押すと開閉してしまうので、
+     つまみの上での操作は開閉に渡さない */
+  .panel > summary .drag {
+    margin-left: auto;
+    min-height: 0;
+    min-width: 0;
+    padding: 2px 9px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    cursor: grab;
+    /* 指でも動かせるようにする(iPadでの操作用) */
+    touch-action: none;
+  }
+  .panel > summary .drag:active { cursor: grabbing; }
+  .panel.is-dragging {
+    opacity: 0.5;
+    outline: 2px dashed var(--accent);
+    outline-offset: 2px;
+  }
+  /* 移動先の目印。隣り合う位置に吸い付き、そこを青く光らせる */
+  .drop-mark {
+    position: absolute;
+    z-index: 5;
+    border-radius: 999px;
+    background: var(--accent);
+    box-shadow: 0 0 0 5px rgba(75, 163, 227, 0.3);
+    pointer-events: none;
+    transition: left 0.12s ease, top 0.12s ease, width 0.12s ease, height 0.12s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .drop-mark { transition: none; }
+  }
+  /* 動かしている間は本文を選択しない(文字列の選択が始まらないように) */
+  body.is-reordering { user-select: none; -webkit-user-select: none; }
 
   /* 新しい写真が届いたことを知らせる通知 */
   .notice {
@@ -121,19 +147,6 @@
     margin: 0;
   }
   .panel-body { padding-top: 6px; }
-  /* 閉じているときは高さを取らない。開いているときだけ縦に伸ばす */
-  .panel.grow[open] {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .panel.grow[open] > .panel-body {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
   @media (prefers-reduced-motion: reduce) {
     .panel > summary::before { transition: none; }
   }
@@ -187,15 +200,117 @@
     color: var(--muted);
     font-weight: 500;
   }
+  /*
+   * ファイル名は既定で1行。収まらない分は末尾の「…」に畳み、
+   * 行の右にあるボタンで全文の表示に切り替える。
+   * 名前が長いせいで表が横に伸び、他の列が読めなくなるのを防ぐため。
+   */
   td.files {
     white-space: normal;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11.5px;
     color: var(--muted);
-    word-break: break-all;
-    min-width: 260px;
+    width: 40%;
+    max-width: 0;
   }
-  td.msg { white-space: normal; min-width: 240px; }
+  .files-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .files-names {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .files-line.is-open .files-names {
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow: visible;
+  }
+  .files-toggle {
+    flex: none;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 7px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+
+  td.msg { white-space: normal; min-width: 240px; padding: 0; }
+  /* 「内容」を押すと詳細が開く。行のどこを押しても効くよう、
+     セルいっぱいのボタンにする */
+  .msg-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+    min-height: 0;
+    min-width: 0;
+    padding: 7px 10px;
+    font: inherit;
+    text-align: left;
+    color: inherit;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    cursor: pointer;
+  }
+  .msg-toggle:hover { background: rgba(255, 255, 255, 0.04); }
+  .msg-toggle .marker {
+    flex: none;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.8;
+    transition: transform 0.15s ease;
+  }
+  .msg-toggle[aria-expanded="true"] .marker { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) {
+    .msg-toggle .marker { transition: none; }
+  }
+
+  /* 詳細。発生場所・例外・HTTPのやり取りをそのまま出す */
+  tr.detail-row > td {
+    white-space: normal;
+    background: var(--surface-sunk);
+    padding: 10px 14px 14px;
+  }
+  .detail-item { margin-top: 10px; }
+  .detail-item:first-child { margin-top: 0; }
+  .detail-label {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .detail-item pre,
+  .detail-item code {
+    display: block;
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--ink);
+  }
+  .detail-item pre {
+    max-height: 260px;
+    overflow: auto;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .detail-where { color: var(--ink); }
+  .detail-where b { color: var(--accent); }
+
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
   .tag {
@@ -244,14 +359,23 @@
 
     <div class="booth-header" style="text-align:left">
       <h1>係員用 運用画面</h1>
-      <p class="subtitle">閲覧ブースの表示切り替えと、保管状況・処理履歴の確認</p>
+      <p class="subtitle">
+        閲覧ブースの表示切り替えと、保管状況・処理履歴の確認。
+        各欄は見出しを押すと開閉、見出し右の「⠿ 移動」をつまむと並べ替えられます。
+      </p>
     </div>
 
-    <div class="console">
-    <div class="col-left">
+    <!--
+      4つの欄はこの中に並べる。見出しの右のつまみで並べ替えられ、
+      並びは端末に記憶する(欄の開閉と同じく、再読み込みしても戻らない)。
+    -->
+    <div class="console" id="console">
 
     <details class="panel" data-panel="control" open>
-      <summary><h2>表示の制御</h2></summary>
+      <summary>
+        <h2>表示の制御</h2>
+        <button type="button" class="drag" aria-label="表示の制御の欄を移動">⠿ 移動</button>
+      </summary>
       <div class="panel-body">
       <p class="hint">
         「結果画面に移行」で、まだ表示していない古い順に<span id="slotCountHint">—</span>人分をまとめて閲覧ブースへ出します。
@@ -296,10 +420,13 @@
     </details>
 
     <details class="panel" data-panel="clients" open>
-      <summary><h2>通信状況</h2></summary>
+      <summary>
+        <h2>通信状況</h2>
+        <button type="button" class="drag" aria-label="通信状況の欄を移動">⠿ 移動</button>
+      </summary>
       <div class="panel-body">
       <p class="hint">各ブースの画面からの応答と、aging APIとの通信結果。</p>
-      <div class="table-scroll" style="max-height:200px">
+      <div class="table-scroll">
         <table>
           <thead>
             <tr><th>ブース</th><th>状態</th><th>最終応答</th><th>往復</th><th>エラー</th></tr>
@@ -312,11 +439,17 @@
     </div>
     </details>
 
-    <details class="panel grow" data-panel="storage" open>
-      <summary><h2>保管中の写真</h2></summary>
+    <details class="panel" data-panel="storage" open>
+      <summary>
+        <h2>保管中の写真</h2>
+        <button type="button" class="drag" aria-label="保管中の写真の欄を移動">⠿ 移動</button>
+      </summary>
       <div class="panel-body">
-      <p class="hint">写真そのものは表示しません。ファイル名と撮影時刻のみ。</p>
-      <div class="table-scroll" style="flex:1; max-height:none">
+      <p class="hint">
+        写真そのものは表示しません。ファイル名と撮影時刻のみ。
+        ファイル名は1行に畳んであります。右の「⋯」で全文に切り替わります。
+      </p>
+      <div class="table-scroll">
         <table>
           <thead>
             <tr>
@@ -330,13 +463,16 @@
     </div>
     </details>
 
-    </div>
-    <div class="col-right">
-
     <details class="panel" data-panel="logs" open>
-      <summary><h2>処理履歴</h2></summary>
+      <summary>
+        <h2>処理履歴</h2>
+        <button type="button" class="drag" aria-label="処理履歴の欄を移動">⠿ 移動</button>
+      </summary>
       <div class="panel-body">
-      <p class="hint">サーバーと各ブースのブラウザ双方の記録。ステータスコードとエラー内容を含みます。</p>
+      <p class="hint">
+        サーバーと各ブースのブラウザ双方の記録。
+        <b>「内容」を押すと詳細</b>(発生した場所・エラーの全文・HTTP通信の要求と応答)が開きます。
+      </p>
       <div class="table-scroll">
         <table>
           <thead>
@@ -351,7 +487,6 @@
     </div>
     </details>
 
-    </div>
     </div>
   </div>
 
@@ -386,6 +521,11 @@
 
   const REFRESH_MS = 3000;
 
+  // ファイル名を全文で出している受付(3秒ごとの更新でも開いたままにする)
+  const openFileRows = new Set();
+  // 詳細を開いている処理履歴のid(同上)
+  const openLogRows = new Set();
+
   // 通知の判定用。ここより大きい番号が現れたら新しい写真
   let lastSeenSequence = 0;
   let firstLoad = true;
@@ -410,6 +550,47 @@
     pendingNotice = 0;
     notice.hidden = true;
   });
+
+  /**
+   * ファイル名の欄を組み立てる。
+   *
+   * 既定は1行で、入りきらない分は末尾の「…」に畳む(名前が長いせいで
+   * 表が横に伸び、番号や状態が読めなくなるのを防ぐため)。
+   * 行の右の「⋯」を押すと全文に切り替わる。
+   * 開いたかどうかは受付ごとに覚えておき、3秒ごとの更新で閉じないようにする。
+   * @param {object} entry
+   */
+  function buildFileNames(entry) {
+    const line = document.createElement('div');
+    line.className = 'files-line';
+
+    const names = document.createElement('span');
+    names.className = 'files-names';
+    const open = openFileRows.has(entry.id);
+    // 畳んでいるときは1行に、開いているときは1件ずつ改行して出す
+    names.textContent = entry.files.length > 0
+      ? entry.files.join(open ? '\n' : ' / ')
+      : '—';
+
+    line.classList.toggle('is-open', open);
+    line.append(names);
+
+    if (entry.files.length > 0) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'files-toggle';
+      toggle.textContent = open ? '▴' : '⋯';
+      toggle.title = open ? '畳む' : '全文を表示';
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.addEventListener('click', () => {
+        if (openFileRows.has(entry.id)) openFileRows.delete(entry.id);
+        else openFileRows.add(entry.id);
+        line.replaceWith(buildFileNames(entry));
+      });
+      line.append(toggle);
+    }
+    return line;
+  }
 
   function renderEntries(entries) {
     entryEmpty.hidden = entries.length > 0;
@@ -440,7 +621,7 @@
 
       const files = document.createElement('td');
       files.className = 'files';
-      files.textContent = entry.files.join('\n') || '—';
+      files.append(buildFileNames(entry));
 
       const action = document.createElement('td');
       const del = document.createElement('button');
@@ -470,9 +651,65 @@
     entryRows.replaceChildren(...rows);
   }
 
+  /**
+   * 詳細のひと区画を作る。
+   * @param {string} label - 見出し
+   * @param {string} text - 中身(そのまま等幅で出す)
+   * @param {boolean} [block] - 枠付きの複数行で出すか
+   */
+  function detailItem(label, text, block = true) {
+    const item = document.createElement('div');
+    item.className = 'detail-item';
+
+    const head = document.createElement('span');
+    head.className = 'detail-label';
+    head.textContent = label;
+
+    const body = document.createElement(block ? 'pre' : 'code');
+    body.textContent = text;
+
+    item.append(head, body);
+    return item;
+  }
+
+  /**
+   * 処理履歴の詳細。押した行の下に開く。
+   *
+   * 出すのは、記録した場所(ファイルと行・桁)、catchで受け取った例外、
+   * HTTP通信の要求と応答の全文。一覧の「内容」は短くしてあるので、
+   * 全文もここに併せて出す。
+   */
+  function buildLogDetail(log) {
+    const box = document.createElement('div');
+    box.className = 'detail';
+    const detail = log.detail || {};
+
+    const where = detail.where;
+    const place = where
+      ? `${where.file}${where.line ? ` — Line ${where.line}${where.column ? `, ${where.column}` : ''}` : ''}`
+      : '記録されていません';
+    const placeItem = detailItem('発生した場所', place, false);
+    placeItem.querySelector('code').classList.add('detail-where');
+    box.append(placeItem);
+
+    box.append(detailItem('内容(全文)', log.message || '—'));
+    if (detail.error) box.append(detailItem('エラー', detail.error));
+    if (detail.request) box.append(detailItem('リクエスト(JSON)', detail.request));
+    if (detail.response) box.append(detailItem('レスポンス(JSON)', detail.response));
+
+    return box;
+  }
+
   function renderLogs(logs) {
     logEmpty.hidden = logs.length > 0;
-    const rows = logs.map((log) => {
+    // 開いている詳細のうち、すでに流れていったものは覚えておかない
+    const alive = new Set(logs.map((log) => log.id));
+    for (const id of [...openLogRows]) {
+      if (!alive.has(id)) openLogRows.delete(id);
+    }
+
+    const rows = [];
+    for (const log of logs) {
       const tr = document.createElement('tr');
 
       const at = document.createElement('td');
@@ -497,14 +734,45 @@
       status.className = 'mono';
       status.textContent = log.status ?? '—';
 
+      // 「内容」を押すと、その下に詳細の行が開く
       const message = document.createElement('td');
       message.className = 'msg';
-      if (log.level !== 'info') message.classList.add(`level-${log.level}`);
-      message.textContent = log.message || '—';
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'msg-toggle';
+      const open = openLogRows.has(log.id);
+      toggle.setAttribute('aria-expanded', String(open));
+
+      const marker = document.createElement('span');
+      marker.className = 'marker';
+      marker.textContent = '▸';
+
+      const text = document.createElement('span');
+      text.className = 'text';
+      if (log.level !== 'info') text.classList.add(`level-${log.level}`);
+      text.textContent = log.message || '—';
+
+      toggle.append(marker, text);
+      toggle.addEventListener('click', () => {
+        if (openLogRows.has(log.id)) openLogRows.delete(log.id);
+        else openLogRows.add(log.id);
+        renderLogs(logs);
+      });
+      message.append(toggle);
 
       tr.append(at, source, seq, event, status, message);
-      return tr;
-    });
+      rows.push(tr);
+
+      if (open) {
+        const detailRow = document.createElement('tr');
+        detailRow.className = 'detail-row';
+        const cell = document.createElement('td');
+        cell.colSpan = 6;
+        cell.append(buildLogDetail(log));
+        detailRow.append(cell);
+        rows.push(detailRow);
+      }
+    }
     logRows.replaceChildren(...rows);
   }
 
@@ -720,6 +988,199 @@
 
   reloadBtn.addEventListener('click', refresh);
 
+  // ---- 欄の並べ替え ----
+  // 見出しの右の「⠿ 移動」をつまんで動かすと、近くの欄の隣に吸い付く。
+  // 吸い付く先は青い印で示す。並びは端末に記憶する。
+  // マウスでも指でも同じ操作になるよう、Pointer Eventsで扱う。
+
+  const consoleEl = document.getElementById('console');
+  const PANEL_ORDER_KEY = 'aging-staff-panel-order';
+
+  // つまんでから何px動かしたら移動を始めるか(押しただけでは動かさない)
+  const DRAG_THRESHOLD_PX = 6;
+
+  let drag = null;
+
+  const panelsInOrder = () => [...consoleEl.querySelectorAll('.panel[data-panel]')];
+
+  function savePanelOrder() {
+    try {
+      localStorage.setItem(PANEL_ORDER_KEY, JSON.stringify(panelsInOrder().map((panel) => panel.dataset.panel)));
+    } catch (err) {
+      // 保存できなくても、そのセッション中の並べ替えは効く
+    }
+  }
+
+  function restorePanelOrder() {
+    let saved = [];
+    try {
+      saved = JSON.parse(localStorage.getItem(PANEL_ORDER_KEY) || '[]');
+    } catch (err) {
+      return;
+    }
+    if (!Array.isArray(saved)) return;
+    // 記憶した順に後ろへ送る。記憶に無い欄(あとから増えたもの)は前に残る
+    for (const name of saved) {
+      const panel = panelsInOrder().find((item) => item.dataset.panel === name);
+      if (panel) consoleEl.append(panel);
+    }
+  }
+
+  /**
+   * いま1列に積まれているか。列数によって、隣り合う位置が
+   * 「左右」なのか「上下」なのかが変わる。
+   */
+  function isSingleColumn() {
+    const panel = panelsInOrder()[0];
+    if (!panel) return true;
+    return consoleEl.getBoundingClientRect().width - panel.getBoundingClientRect().width < 40;
+  }
+
+  /**
+   * 指のある場所から、どの欄のどちら側に入れるかを決める。
+   * 各欄の「手前側」「奥側」の縁を候補にして、いちばん近いものを選ぶ。
+   * こうすると、必ずどれかの欄に隣り合う位置に吸い付く。
+   */
+  function dropTargetAt(x, y, dragged) {
+    const vertical = isSingleColumn();
+    let best = null;
+
+    for (const panel of panelsInOrder()) {
+      if (panel === dragged) continue;
+      const rect = panel.getBoundingClientRect();
+      for (const side of ['before', 'after']) {
+        const point = vertical
+          ? { x: rect.left + rect.width / 2, y: side === 'before' ? rect.top : rect.bottom }
+          : { x: side === 'before' ? rect.left : rect.right, y: rect.top + rect.height / 2 };
+        const distance = Math.hypot(x - point.x, y - point.y);
+        if (!best || distance < best.distance) best = { panel, side, rect, vertical, distance };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 吸い付く先を青い印で示す。
+   */
+  function showDropMark(target) {
+    if (!drag) return;
+    const area = consoleEl.getBoundingClientRect();
+    const { rect, side, vertical } = target;
+    const mark = drag.mark;
+
+    if (vertical) {
+      const edge = side === 'before' ? rect.top : rect.bottom;
+      mark.style.left = `${rect.left - area.left}px`;
+      mark.style.width = `${rect.width}px`;
+      mark.style.top = `${edge - area.top - 3}px`;
+      mark.style.height = '6px';
+    } else {
+      const edge = side === 'before' ? rect.left : rect.right;
+      mark.style.left = `${edge - area.left - 3}px`;
+      mark.style.width = '6px';
+      mark.style.top = `${rect.top - area.top}px`;
+      mark.style.height = `${rect.height}px`;
+    }
+  }
+
+  /**
+   * 指の位置に合わせて、吸い付く先を決め直す。
+   */
+  function updateDrag(x, y) {
+    const target = dropTargetAt(x, y, drag.panel);
+    if (!target) return;
+    drag.target = target;
+    showDropMark(target);
+  }
+
+  function beginDrag() {
+    drag.active = true;
+    drag.panel.classList.add('is-dragging');
+    document.body.classList.add('is-reordering');
+    drag.mark = document.createElement('div');
+    drag.mark.className = 'drop-mark';
+    consoleEl.append(drag.mark);
+  }
+
+  function endDrag(commit) {
+    if (!drag) return;
+    const { panel, mark, target, active } = drag;
+    drag = null;
+
+    panel.classList.remove('is-dragging');
+    document.body.classList.remove('is-reordering');
+    if (mark) mark.remove();
+    if (!active || !commit || !target) return;
+
+    if (target.side === 'before') target.panel.before(panel);
+    else target.panel.after(panel);
+    savePanelOrder();
+  }
+
+  /**
+   * 欄を1つ分だけ動かす(つまみにフォーカスした状態の矢印キー用)。
+   * @param {HTMLElement} panel
+   * @param {number} step - -1で前へ、1で後ろへ
+   */
+  function movePanel(panel, step) {
+    const panels = panelsInOrder();
+    const index = panels.indexOf(panel);
+    const next = index + step;
+    if (next < 0 || next >= panels.length) return;
+    if (step < 0) panels[next].before(panel);
+    else panels[next].after(panel);
+    savePanelOrder();
+    panel.querySelector('summary .drag')?.focus();
+  }
+
+  for (const handle of consoleEl.querySelectorAll('summary .drag')) {
+    const panel = handle.closest('.panel');
+
+    // つまみの上での押下は、見出しの開閉に渡さない
+    handle.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      handle.setPointerCapture(event.pointerId);
+      drag = { panel, handle, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false, target: null, mark: null };
+    });
+
+    handle.addEventListener('pointermove', (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag.active) {
+        // 少し動かしてから移動を始める(押しただけで並びが変わらないように)
+        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+        beginDrag();
+      }
+      updateDrag(event.clientX, event.clientY);
+    });
+
+    handle.addEventListener('pointerup', (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      endDrag(true);
+    });
+
+    handle.addEventListener('pointercancel', () => endDrag(false));
+
+    handle.addEventListener('keydown', (event) => {
+      const back = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+      const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+      if (!back && !forward) return;
+      event.preventDefault();
+      movePanel(panel, back ? -1 : 1);
+    });
+  }
+
+  // 途中でやめたいとき
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && drag) endDrag(false);
+  });
+
   // ---- 各欄の開閉 ----
   // どれを開いていたかを端末に覚えさせる。画面を再読み込みしても戻らない。
   const PANEL_STORAGE_KEY = 'aging-staff-panels';
@@ -752,6 +1213,7 @@
     panel.addEventListener('toggle', savePanels);
   }
   restorePanels();
+  restorePanelOrder();
 
   startHeartbeat('staff');
   refresh();

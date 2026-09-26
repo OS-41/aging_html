@@ -572,7 +572,12 @@
     } catch (err) {
       segmentationReady = false;
       setSegmentState('利用できません（背景なしで撮影します）');
-      logEvent({ level: 'warn', event: 'segmentation:unavailable', message: err.message });
+      logEvent({
+        level: 'warn',
+        event: 'segmentation:unavailable',
+        message: 'スクリプトを読み込めません',
+        detail: { where: whereFrom(err.stack), error: err.stack || String(err) }
+      });
     }
   }
 
@@ -591,7 +596,12 @@
         } catch (err) {
           segmentationReady = false;
           setSegmentState('停止しました（背景なしで撮影します）');
-          logEvent({ level: 'error', event: 'segmentation:failed', message: err.message });
+          logEvent({
+            level: 'error',
+            event: 'segmentation:failed',
+            message: '切り抜きに失敗',
+            detail: { where: whereFrom(err.stack), error: err.stack || String(err) }
+          });
         }
       } else {
         drawComposite(video, null);
@@ -684,7 +694,12 @@
         });
       } catch (err) {
         if (!cameraId) throw err;
-        logEvent({ level: 'warn', event: 'camera:fallback', message: `選択中のカメラを使えません: ${err.message}` });
+        logEvent({
+          level: 'warn',
+          event: 'camera:fallback',
+          message: '選択中のカメラを使えません',
+          detail: { where: whereFrom(err.stack), error: err.stack || String(err) }
+        });
         cameraId = '';
         saveCameraId('');
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
@@ -700,7 +715,12 @@
       await refreshCameraList();
     } catch (err) {
       setStatus('カメラを使用できません。係員をお呼びください', 'error');
-      logEvent({ level: 'error', event: 'camera:failed', message: err.message });
+      logEvent({
+        level: 'error',
+        event: 'camera:failed',
+        message: 'カメラを開始できません',
+        detail: { where: whereFrom(err.stack), error: err.stack || String(err) }
+      });
     }
   }
 
@@ -1087,7 +1107,12 @@
 
       result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
-      logEvent({ level: 'error', event: 'capture:send', message: `送信に失敗: ${err.message}` });
+      logEvent({
+        level: 'error',
+        event: 'capture:send',
+        message: '送信に失敗',
+        detail: { where: whereFrom(err.stack), error: err.stack || String(err) }
+      });
       showTechnicalFailure(`送信エラー: ${err.message}`);
       return;
     }

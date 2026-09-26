@@ -245,12 +245,20 @@
   @media (prefers-reduced-motion: reduce) {
     #backdrop .layer { transition: none; }
   }
+  /*
+   * 煙は演出の間だけ写真より手前に置く(is-front)。
+   * 煙が晴れて写真が見えてくる見せ方なので、覆っている間に写真が
+   * 煙の上に出ていると透けてしまう。
+   * 演出が終わったら後ろへ回す。前に出たまま漂わせると、結果の写真が
+   * 白くかすんでしまうため。canvasは操作を受けないので前後どちらでもよい。
+   */
   body.is-tamatebako #ocean {
     z-index: 0;
     pointer-events: none;
     opacity: 1;
   }
-  /* 煙の演出が主役なので、区画そのものは煙の中に浮かべる */
+  body.is-tamatebako #ocean.is-front { z-index: 2; }
+  /* 煙の演出が主役なので、区画そのものは煙と同じ場所に重ねる */
   body.is-tamatebako .booth { position: relative; z-index: 1; }
   body.is-tamatebako .slots {
     /* 背景の絵で煙が広がっている範囲。ここに写真を置く。
@@ -547,6 +555,7 @@
           if (currentTheme === 'tamatebako' && display.mode !== 'results') {
             // 煙を消し、ふたを閉じた絵へ戻す
             tamatebakoScene.close();
+            ocean.classList.remove('is-front');
             setBackdrop('closed');
           }
           render(display);
@@ -631,6 +640,8 @@
     pendingDisplay = display;
     // ふたが開いて煙が立ちのぼっている間は区画を見せない
     slotsEl.classList.add('is-veiled');
+    // 演出の間は煙を写真より手前に置き、覆い隠す役をさせる
+    ocean.classList.add('is-front');
     tamatebakoScene.play();
   }
 
@@ -673,6 +684,12 @@
 
     // 5. あとは煙が晴れるのに任せる。区画の側では隠さない
     slotsEl.classList.remove('is-veiled');
+
+    // 晴れきったら煙を写真の後ろへ回す。前に出たまま漂わせると
+    // 結果の写真が白くかすむため、漂う煙は背景の側で見せる
+    if (phase === 'done') {
+      ocean.classList.remove('is-front');
+    }
   }
 
   function resizeOcean() {

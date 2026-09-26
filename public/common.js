@@ -40,21 +40,74 @@ let sendingLog = false;
 let clientErrorCount = 0;
 
 /**
+ * 例外のstackから「どこで起きたか」を取り出す。
+ * ブラウザによって書式が違うので、末尾の :行:桁 だけを拾う。
+ * @param {string} stack
+ * @returns {{file: string, line: number|null, column: number|null}|null}
+ */
+function whereFrom(stack) {
+  for (const line of String(stack || '').split('\n')) {
+    const match = line.match(/((?:https?:\/\/|\/)[^\s()]+?):(\d+):(\d+)\)?\s*$/);
+    if (!match) continue;
+    // URLではなくファイル名だけを見せる(公開パスを履歴に残さないため)
+    const file = match[1].split('?')[0].split('/').pop() || match[1];
+    return { file, line: Number(match[2]), column: Number(match[3]) };
+  }
+  return null;
+}
+
+/**
+ * このブラウザで今いる場所(呼び出し元のファイルと行)を取る。
+ * 処理履歴の詳細に添えて、係員が原因を追えるようにするため。
+ */
+function currentWhere() {
+  try {
+    // whereFrom / currentWhere 自身の枠は common.js なので、
+    // 呼び出し元まで含めて最初に当たったものを使う
+    const stack = new Error().stack.split('\n').filter((line) => !/currentWhere|whereFrom/.test(line));
+    return whereFrom(stack.join('\n'));
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
  * 係員画面の処理履歴に、このブラウザでの出来事を残す。
  * 送信自体の失敗は握りつぶす(展示の進行を止めないため)。
+ *
+ * message は一覧に出る一行なので短く保ち、通信の全文や例外の内容は
+ * detail (where / error / request / response) に入れる。係員画面では
+ * 「内容」を押すと detail が開く。
  */
-function logEvent({ level = 'info', event, message = '', status = null, sequence = null }) {
+function logEvent({ level = 'info', event, message = '', status = null, sequence = null, detail = null }) {
   if (sendingLog) return;
   sendingLog = true;
+
+  const body = { level, event, message: String(message), status, sequence };
+  const where = detail?.where || currentWhere();
+  if (detail || where) {
+    body.detail = { ...(detail || {}), ...(where ? { where } : {}) };
+  }
 
   fetch(BACKEND_BASE + '/api/logs', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ level, event, message: String(message), status, sequence })
+    body: JSON.stringify(body)
   })
     .catch(() => {})
     .finally(() => { sendingLog = false; });
+}
+
+/**
+ * 処理履歴の詳細に載せるJSON。読める形に整えて返す。
+ */
+function detailJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return String(value);
+  }
 }
 
 /**
@@ -63,12 +116,28 @@ function logEvent({ level = 'info', event, message = '', status = null, sequence
  * 失敗した場合はステータスコード付きで処理履歴に残す。
  */
 async function callApi(apiPath, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  // FormDataは中身を展開できないので、種類だけを残す
+  const requestBody = typeof options.body === 'string' ? options.body
+    : (options.body ? `(${options.body.constructor?.name || typeof options.body})` : null);
+  const request = detailJson({ method, url: apiPath, headers: options.headers || null, body: requestBody });
+
   let res;
   try {
     res = await fetch(BACKEND_BASE + apiPath, { credentials: 'same-origin', ...options });
   } catch (networkErr) {
     clientErrorCount += 1;
-    logEvent({ level: 'error', event: 'fetch:failed', message: `${apiPath} ${networkErr.message}` });
+    logEvent({
+      level: 'error',
+      event: 'fetch:failed',
+      message: `${apiPath} に届きません`,
+      detail: {
+        where: whereFrom(networkErr.stack),
+        error: networkErr.stack || String(networkErr),
+        request,
+        response: detailJson({ status: null, body: '(応答なし)' })
+      }
+    });
     throw new Error(`サーバーに接続できません。詳細: ${networkErr.message}`);
   }
 
@@ -83,7 +152,17 @@ async function callApi(apiPath, options = {}) {
       level: 'error',
       event: 'fetch:error',
       status: res.status,
-      message: `${apiPath} ${payload.error || ''}`
+      // 一覧はどこが失敗したかだけ。やり取りの全文は詳細で見る
+      message: `${apiPath} ${payload.error || ''}`.trim(),
+      detail: {
+        request,
+        response: detailJson({
+          status: res.status,
+          status_text: res.statusText,
+          headers: Object.fromEntries(res.headers),
+          body: payload
+        })
+      }
     });
     const error = new Error(payload.error || `リクエストが失敗しました (${res.status})`);
     error.status = res.status;

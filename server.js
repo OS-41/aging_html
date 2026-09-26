@@ -343,6 +343,114 @@ function recordAgingApiCall(status, errorMessage = null) {
 
 const SERVER_STARTED_AT_MS = Date.now();
 
+/*
+ * ---- 処理履歴の詳細 ----
+ *
+ * 一覧の「内容」は一行で読める長さに保ち、原因を追うための材料は
+ * detail に入れて係員画面で開けるようにする。中身は次の4つ。
+ *
+ *   where    どのファイルの何行目で記録したか(サーバー側は自動で取る)
+ *   error    catchで受け取った例外の内容(stack込み)
+ *   request  HTTP通信の要求の全文(JSON)
+ *   response HTTP通信の応答の全文(JSON)
+ *
+ * 展示中にメモリを食いつぶさないよう、1項目あたりの長さを制限する。
+ */
+const DETAIL_MAX_CHARS = 4000;
+
+/**
+ * 長すぎる文字列を切り詰める。切ったことが分かるよう残りの文字数を添える。
+ */
+function trimDetailText(value, max = DETAIL_MAX_CHARS) {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…(以下略 ${text.length - max}文字)`;
+}
+
+/**
+ * 詳細に載せるJSON。読めるように整形してから切り詰める。
+ */
+function formatDetailJson(value) {
+  try {
+    return trimDetailText(JSON.stringify(value, null, 2));
+  } catch (err) {
+    return trimDetailText(String(value));
+  }
+}
+
+/**
+ * ヘッダーからAPIキーを伏せる。処理履歴は係員画面に出るため、
+ * Authorization をそのまま残さない。
+ */
+function redactHeaders(headers) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    out[key] = /^authorization$/i.test(key) ? 'Bearer ***(伏せ字)' : value;
+  }
+  return out;
+}
+
+/**
+ * HTTP通信の要求と応答を、詳細に載せる形へまとめる。
+ * @param {{method: string, url: string, headers?: object, body?: unknown}} request
+ * @param {{status: number, statusText?: string, headers?: object, body?: unknown}} response
+ */
+function httpDetail(request, response) {
+  return {
+    request: formatDetailJson({
+      method: request.method,
+      url: request.url,
+      headers: redactHeaders(request.headers),
+      body: request.body ?? null
+    }),
+    response: formatDetailJson({
+      status: response.status,
+      status_text: response.statusText || '',
+      headers: response.headers || null,
+      body: response.body ?? null
+    })
+  };
+}
+
+/**
+ * この記録を残した場所(ファイル名と行・桁)をスタックから取り出す。
+ * 係員が「どこで起きたか」を追えるようにするため、サーバー側の記録には
+ * 呼び出し元を自動で添える。
+ */
+function callerLocation() {
+  const stack = (new Error().stack || '').split('\n').slice(1);
+  for (const line of stack) {
+    // この関数自身と addLog の枠は飛ばし、実際に記録した場所を返す
+    if (/\bat (callerLocation|addLog)\b/.test(line)) continue;
+    const match = line.match(/\(?([^()\s]+):(\d+):(\d+)\)?\s*$/);
+    if (!match) continue;
+    return { file: path.basename(match[1]), line: Number(match[2]), column: Number(match[3]) };
+  }
+  return null;
+}
+
+/**
+ * 詳細を保存できる形に整える。クライアントから届いたものもここを通す。
+ */
+function normaliseDetail(detail) {
+  const out = {};
+  if (!detail || typeof detail !== 'object') return out;
+
+  const where = detail.where;
+  if (where && typeof where === 'object' && where.file) {
+    out.where = {
+      file: String(where.file).slice(0, 120),
+      line: Number.isFinite(Number(where.line)) ? Number(where.line) : null,
+      column: Number.isFinite(Number(where.column)) ? Number(where.column) : null
+    };
+  }
+  for (const key of ['error', 'request', 'response']) {
+    if (detail[key]) out[key] = trimDetailText(detail[key]);
+  }
+  return out;
+}
+
 /**
  * 処理履歴を1件追加する。古いものから捨てて件数を抑える。
  *
@@ -352,8 +460,16 @@ const SERVER_STARTED_AT_MS = Date.now();
  * 処理履歴はメモリ上にあるため再起動で消えるうえ、起動に失敗した場合は
  * 係員画面自体が開けないため、そこだけは二重に残す。
  * @param {boolean} [options.echo] - infoでもホスティング側のログに出すか
+ * @param {object} [options.detail] - 係員画面で開く詳細(where/error/request/response)
  */
-function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null, echo = false }) {
+function addLog({ source = 'server', level = 'info', event, message = '', status = null, sequence = null, echo = false, detail = null }) {
+  const info = normaliseDetail(detail);
+  // サーバー側は記録した場所を自動で添える(クライアント側は届いたものを使う)
+  if (source === 'server' && !info.where) {
+    const where = callerLocation();
+    if (where) info.where = where;
+  }
+
   logSequence += 1;
   logStore.push({
     id: logSequence,
@@ -363,7 +479,8 @@ function addLog({ source = 'server', level = 'info', event, message = '', status
     event,
     message: String(message).slice(0, 500),
     status,
-    sequence
+    sequence,
+    detail: Object.keys(info).length > 0 ? info : null
   });
   if (logStore.length > MAX_LOG_ENTRIES) {
     logStore.splice(0, logStore.length - MAX_LOG_ENTRIES);
@@ -577,21 +694,27 @@ const AGING_API_STATUS_ERRORS = {
 };
 
 /**
- * エラーコードとHTTPステータスから、係員向けの一行を組み立てる。
+ * エラーコードとHTTPステータスから、係員向けの説明を組み立てる。
+ *
+ * 一覧には summary(原因だけの短い一行)を出し、コードやAPIの原文を含む
+ * full は詳細と、撮影ブースに出す係員向けの行に回す。
+ *
  * @param {string|null} code
  * @param {number|null} status
  * @param {string} message - APIが返した説明
+ * @returns {{summary: string, full: string}}
  */
 function describeAgingError(code, status, message) {
   const known = code && AGING_API_ERRORS[code];
   const byStatus = status && AGING_API_STATUS_ERRORS[status];
+  const summary = known || byStatus || code || message || '生成に失敗しました';
+
   const parts = [];
-  if (known) parts.push(known);
-  else if (byStatus) parts.push(byStatus);
+  if (known || byStatus) parts.push(known || byStatus);
   if (code) parts.push(`code=${code}`);
   if (status) parts.push(`HTTP ${status}`);
   if (message && message !== code) parts.push(message);
-  return parts.join(' / ');
+  return { summary, full: parts.join(' / ') };
 }
 
 /**
@@ -614,32 +737,47 @@ function agingErrorFrom(payload) {
  * @param {string} srcFileUrl - 外部から取得できる元画像のURL
  */
 async function startAgingTask(srcFileUrl, sequence) {
+  const requestHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${AGING_API_KEY}`
+  };
+  const requestBody = { request_id: 0, src_file_url: srcFileUrl };
+
   const res = await fetch(AGING_API_BASE_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${AGING_API_KEY}`
-    },
-    body: JSON.stringify({ request_id: 0, src_file_url: srcFileUrl })
+    headers: requestHeaders,
+    body: JSON.stringify(requestBody)
   });
 
   const payload = await res.json().catch(() => ({}));
   const taskId = payload?.data?.task_id;
+  // やり取りの全文は詳細へ回し、一覧には短い一行だけを出す
+  const exchange = httpDetail(
+    { method: 'POST', url: AGING_API_BASE_URL, headers: requestHeaders, body: requestBody },
+    { status: res.status, statusText: res.statusText, headers: Object.fromEntries(res.headers), body: payload }
+  );
 
   if (!taskId) {
-    // 原因を1行にまとめてから記録する。ユニット不足と鍵の誤りとレート制限は
+    // 原因を短くまとめてから記録する。ユニット不足と鍵の誤りとレート制限は
     // 対処がまるで違うため、係員画面でそのまま読めるようにしておく。
     const { code, message } = agingErrorFrom(payload);
     const described = describeAgingError(code, res.status, message);
-    recordAgingApiCall(res.status, described);
-    addLog({ level: 'error', event: 'aging:start', status: res.status, sequence, message: described });
-    const err = new Error(`タスクを開始できませんでした: ${described}`);
+    recordAgingApiCall(res.status, described.summary);
+    addLog({
+      level: 'error',
+      event: 'aging:start',
+      status: res.status,
+      sequence,
+      message: described.summary,
+      detail: { ...exchange, error: described.full }
+    });
+    const err = new Error(`タスクを開始できませんでした: ${described.full}`);
     err.code = code;
     throw err;
   }
 
   recordAgingApiCall(res.status);
-  addLog({ event: 'aging:start', status: res.status, sequence, message: `task_id=${taskId}` });
+  addLog({ event: 'aging:start', status: res.status, sequence, message: 'タスクを開始', detail: exchange });
   return taskId;
 }
 
@@ -647,36 +785,55 @@ async function startAgingTask(srcFileUrl, sequence) {
  * タスクの完了を待ち、results を返す。
  */
 async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts = 100 } = {}) {
+  const url = `${AGING_API_BASE_URL}/${taskId}`;
+  const requestHeaders = { Authorization: `Bearer ${AGING_API_KEY}` };
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(`${AGING_API_BASE_URL}/${taskId}`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${AGING_API_KEY}` }
-    });
+    const res = await fetch(url, { method: 'GET', headers: requestHeaders });
     const payload = await res.json().catch(() => ({}));
     const taskStatus = payload?.data?.task_status;
+    const exchange = httpDetail(
+      { method: 'GET', url, headers: requestHeaders, body: null },
+      { status: res.status, statusText: res.statusText, headers: Object.fromEntries(res.headers), body: payload }
+    );
 
     if (taskStatus === 'success') {
       recordAgingApiCall(res.status);
-      addLog({ event: 'aging:success', status: res.status, sequence, message: `${attempt}回目のポーリングで完了` });
+      addLog({
+        event: 'aging:success',
+        status: res.status,
+        sequence,
+        message: `生成が完了(${attempt}回目)`,
+        detail: exchange
+      });
       return payload.data.results;
     }
     if (taskStatus === 'error') {
       const { code, message } = agingErrorFrom(payload);
-      const detail = describeAgingError(code, null, message);
-      recordAgingApiCall(res.status, detail);
-      addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
-      const err = new Error(detail);
+      const described = describeAgingError(code, null, message);
+      recordAgingApiCall(res.status, described.summary);
+      addLog({
+        level: 'error',
+        event: 'aging:failed',
+        status: res.status,
+        sequence,
+        message: described.summary,
+        detail: { ...exchange, error: described.full }
+      });
+      const err = new Error(described.full);
       err.code = code;
       throw err;
     }
     if (!res.ok) {
       const { code, message } = agingErrorFrom(payload);
+      const described = describeAgingError(code, res.status, message);
       addLog({
         level: 'warn',
         event: 'aging:poll',
         status: res.status,
         sequence,
-        message: `${attempt}回目: ${describeAgingError(code, res.status, message)}`
+        message: `${attempt}回目: ${described.summary}`,
+        detail: { ...exchange, error: described.full }
       });
     }
 
@@ -694,7 +851,23 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
 async function downloadResultImage(entryId, index, output, sequence) {
   const res = await fetch(output.url);
   if (!res.ok) {
-    addLog({ level: 'error', event: 'result:download', status: res.status, sequence, message: `${index}枚目の取得に失敗` });
+    addLog({
+      level: 'error',
+      event: 'result:download',
+      status: res.status,
+      sequence,
+      message: `${index}枚目を取得できません`,
+      detail: httpDetail(
+        { method: 'GET', url: output.url, headers: {}, body: null },
+        {
+          status: res.status,
+          statusText: res.statusText,
+          headers: Object.fromEntries(res.headers),
+          // 本文は画像(またはエラー本文)。長さだけを控える
+          body: `(本文は画像データのため省略 / content-length: ${res.headers.get('content-length') || '不明'})`
+        }
+      )
+    });
     throw new Error(`結果画像を取得できませんでした (${res.status})`);
   }
 
@@ -758,7 +931,15 @@ async function processEntry(entry, origin) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
     }
-    addLog({ level: 'error', event: 'entry:error', sequence: entry.sequence, message: err.message });
+    addLog({
+      level: 'error',
+      event: 'entry:error',
+      sequence: entry.sequence,
+      // 一覧には原因の頭だけ(describeAgingErrorの summary にあたる部分)。
+      // コードやAPIの原文、例外の全文は詳細で見る
+      message: (err.message || '生成に失敗').split(' / ')[0],
+      detail: { error: err.stack || String(err) }
+    });
   }
 }
 
@@ -1115,7 +1296,7 @@ router.get('/api/logs', requireBasicAuth, (req, res) => {
  * 各ブースのブラウザから通信結果を送ってもらい、同じ時系列に残す。
  */
 router.post('/api/logs', requireBasicAuth, (req, res) => {
-  const { level, event, message, status, sequence } = req.body || {};
+  const { level, event, message, status, sequence, detail } = req.body || {};
   if (!event) {
     return res.status(400).json({ error: 'eventが指定されていません' });
   }
@@ -1126,7 +1307,9 @@ router.post('/api/logs', requireBasicAuth, (req, res) => {
     event: String(event).slice(0, 80),
     message,
     status: Number.isInteger(status) ? status : null,
-    sequence: Number.isInteger(sequence) ? sequence : null
+    sequence: Number.isInteger(sequence) ? sequence : null,
+    // 届いた詳細は normaliseDetail が形と長さを整える
+    detail
   });
   res.status(204).send();
 });
