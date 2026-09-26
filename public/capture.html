@@ -101,6 +101,20 @@
     color: var(--muted);
     margin: 0;
   }
+  /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
+  .dev-bar {
+    margin-top: 0;
+    padding-top: 12px;
+  }
+  .dev-bar .dev-tag {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(255, 196, 0, 0.9);
+    color: #1b1b1b;
+    font-weight: 700;
+    font-size: 13px;
+  }
+
   /* 係員向け。来場者の邪魔をしない大きさで、実際のエラー内容を出す */
   .failure-detail {
     margin: 12px 0 0;
@@ -181,6 +195,31 @@
       <span id="segmentState">背景合成: 準備中</span>
       <button type="button" class="quiet" id="resetBtn">次の人へ</button>
     </div>
+
+    <!--
+      開発モードのときだけ出る欄。係員画面で開発モードに入ると現れ、
+      抜けると消える。ここで選んだ状態は画面の見た目だけを変え、
+      aging APIも受付も一切動かさない。
+    -->
+    <div class="staff-bar dev-bar" id="devBar" hidden>
+      <span class="dev-tag">開発モード</span>
+      <label>表示する状態
+        <select id="devStateSelect">
+          <option value="">（選んでください）</option>
+          <optgroup label="通常の流れ">
+            <option value="flow:camera">撮影前（カメラ映像）</option>
+            <option value="flow:confirm">撮影後の確認</option>
+            <option value="flow:sending">送信中</option>
+            <option value="flow:checking">お顔の確認中</option>
+            <option value="flow:receipt">受付完了（番号）</option>
+          </optgroup>
+          <!-- 撮り直しの案内と技術的な問題は、実際の表と同じ内容から組み立てる -->
+          <optgroup label="撮り直しの案内（画像のエラー）" id="devImageGroup"></optgroup>
+          <optgroup label="技術的な問題（係員を呼ぶ）" id="devTechGroup"></optgroup>
+        </select>
+      </label>
+      <button type="button" class="quiet" id="devResetBtn">撮影画面に戻す</button>
+    </div>
   </div>
 
 <script src="common.js"></script>
@@ -210,6 +249,11 @@
   const receiptNumber = document.getElementById('receiptNumber');
   const sentCount = document.getElementById('sentCount');
   const resetBtn = document.getElementById('resetBtn');
+  const devBar = document.getElementById('devBar');
+  const devStateSelect = document.getElementById('devStateSelect');
+  const devImageGroup = document.getElementById('devImageGroup');
+  const devTechGroup = document.getElementById('devTechGroup');
+  const devResetBtn = document.getElementById('devResetBtn');
 
   // 送信後、次の来場者のために自動で初期状態へ戻すまでの時間
   const AUTO_RESET_MS = 20000;
@@ -259,6 +303,50 @@
   const TECHNICAL_ACTION = '係員をお呼びください';
   const TECHNICAL_NOTE = '係員の方へ: 管理画面(/staff.html)の処理履歴で原因を確認してください';
 
+  /*
+   * 開発モードで確認できる「技術的な問題」の一覧。
+   *
+   * 表示そのものはどのコードでも同じ(技術的な問題・係員を呼ぶ)なので、
+   * ここに並べるのは係員向けの1行がどう出るかを確かめるため。文面は
+   * サーバーが実際に組み立てる形(describeAgingError)に合わせてある。
+   * 来場者向けの案内はこの表に依存しないので、コードが増えても
+   * 表示が壊れることはない。
+   */
+  const DEV_TECHNICAL_CASES = [
+    // --- タスクの依頼(POST)で返るもの ---
+    { label: 'APIのユニット不足', detail: 'タスクを開始できませんでした: APIのユニットが不足しています(追加購入が必要) / code=CreditInsufficiency / HTTP 400 / Insufficient unit to run' },
+    { label: 'リクエスト内容が不正', detail: 'タスクを開始できませんでした: リクエストの内容が不正です / code=InvalidParameters / HTTP 400 / Invalid request parameters' },
+    { label: '想定外のリクエスト', detail: 'タスクを開始できませんでした: 想定外のリクエスト内容です / code=BadRequest / HTTP 400 / Unexpected request parameter' },
+    { label: 'スタイルグループIDが不正', detail: 'タスクを開始できませんでした: スタイルグループIDが不正です / code=InvalidStyleGroup / HTTP 400 / Invalid style group id' },
+    { label: 'スタイルIDが不正', detail: 'タスクを開始できませんでした: スタイルIDが不正です / code=InvalidStyle / HTTP 400 / Invalid style id' },
+    { label: 'APIキーが無効 (401)', detail: 'タスクを開始できませんでした: APIキーが無効です / HTTP 401 / Invalid API key' },
+    { label: 'レート制限 (429)', detail: 'タスクを開始できませんでした: リクエストが多すぎます(レート制限) / HTTP 429 / Too many requests' },
+
+    // --- 進行状況の確認(GET)で返るもの ---
+    { label: 'task_idが不正 (400)', detail: 'タスクを開始できませんでした: リクエストが不正です(task_idの誤りを含む) / HTTP 400 / Invalid task ID' },
+    { label: 'API側で時間切れ (500)', detail: 'aging API側で処理が時間切れになりました / HTTP 500 / Task execution timed out' },
+
+    // --- 生成の途中で失敗したもの(来場者の姿勢では直らない) ---
+    { label: '写真が小さすぎる', detail: 'code=error_below_min_image_size' },
+    { label: '元画像を取得できない', detail: 'code=error_download_image' },
+    { label: '生成に失敗', detail: 'code=error_inference' },
+    { label: '結果を保存できない', detail: 'code=error_upload' },
+    { label: 'ファイルサイズ超過', detail: 'code=exceed_max_filesize' },
+    { label: '縦横比が非対応', detail: 'code=error_unsupport_ratio' },
+    { label: '設定値の誤り', detail: 'code=invalid_parameter' },
+    { label: '原因不明の内部エラー', detail: 'code=unknown_internal_error' },
+    { label: '髪が短すぎる', detail: 'code=error_hair_too_short' },
+    { label: '髪が写っていない', detail: 'code=error_bald_image' },
+
+    // --- API以外の失敗 ---
+    { label: '送信そのものに失敗', detail: '送信エラー: Failed to fetch' },
+    { label: '生成が時間内に終わらない', detail: '生成が時間内に完了しませんでした' },
+    { label: 'コードが取れなかった場合', detail: '写真をうまく処理できませんでした' }
+  ];
+
+  // 開発モードの見本で使う受付番号(実在しないことが分かる値)
+  const DEV_SAMPLE_SEQUENCE = 0;
+
   // 受付を送ったあと、生成が早々に失敗しないかを見張る時間。
   // aging APIが顔を認識できない場合はここで分かるので、来場者がまだ
   // ブースにいるうちに撮り直してもらえる。生成そのものの完了は待たない
@@ -304,7 +392,7 @@
   const SCENE_MAX_SIDE = 960;
   // 演出の書き換えはこの間隔で十分(カメラの合成は毎フレーム行う)
   const SCENE_FRAME_MS = 1000 / 30;
-  // 「閲覧ブースに合わせる」ときに絵柄を確認する間隔
+  // サーバーの状態(絵柄・開発モード)を確認する間隔
   const THEME_POLL_MS = 5000;
 
   // 使うカメラの記憶先。撮影のたびに選び直さずに済むよう、
@@ -363,18 +451,24 @@
   }
 
   /**
-   * 閲覧ブースで選ばれている絵柄に合わせる。
+   * サーバーの状態を取り込む。開発モードの出入りと、「閲覧ブースに合わせる」
+   * ときの絵柄をここでまとめて反映する(問い合わせは1回で済ませる)。
    */
-  async function syncTheme() {
-    if (backgroundMode !== 'sync') return;
+  async function syncDisplay() {
+    let display;
     try {
-      const display = await callApi('/api/display');
-      const theme = SYNC_FALLBACK[display.theme] || display.theme;
-      if (scene.setTheme(theme)) {
-        logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
-      }
+      display = await callApi('/api/display');
     } catch (err) {
-      // 取得できなければ現在の絵柄のまま描き続ける
+      // 取得できなければ現在の状態のまま(絵柄も開発モードも変えない)
+      return;
+    }
+
+    setDevMode(display.dev_mode === true);
+
+    if (backgroundMode !== 'sync') return;
+    const theme = SYNC_FALLBACK[display.theme] || display.theme;
+    if (scene.setTheme(theme)) {
+      logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
     }
   }
 
@@ -721,6 +815,165 @@
     setStatus(stream ? '正面を向いて「撮影する」を押してください' : '「カメラを開始」を押してください');
   }
 
+  // ---- 開発モード ----
+  // 係員画面で開発モードに入っている間だけ、表示する状態を選べるようにする。
+  // aging APIのユニットが尽きている間でも、各状態の見た目を確認できる。
+  // 選んでも受付は作らず、写真も送らない(画面の見た目だけを変える)。
+
+  let devMode = false;
+
+  /**
+   * 状態を選ぶ欄の中身を、実際のエラー表から組み立てる。
+   * 表に手を入れたら選択肢も自動で増える。
+   */
+  function buildDevStateOptions() {
+    devImageGroup.replaceChildren(...Object.entries(IMAGE_ERROR_MESSAGES).map(([code, instruction]) => {
+      const option = document.createElement('option');
+      option.value = `image:${code}`;
+      option.textContent = `${instruction}（${code}）`;
+      return option;
+    }));
+
+    devTechGroup.replaceChildren(...DEV_TECHNICAL_CASES.map((item, index) => {
+      const option = document.createElement('option');
+      option.value = `tech:${index}`;
+      option.textContent = item.label;
+      return option;
+    }));
+  }
+
+  /**
+   * 開発モードの出入りを画面に反映する。
+   * 抜けるときは見本の状態を残さず、撮影画面に戻す。
+   * @param {boolean} on
+   */
+  function setDevMode(on) {
+    if (on === devMode) return;
+    devMode = on;
+    devBar.hidden = !on;
+    logEvent({
+      level: on ? 'warn' : 'info',
+      event: 'dev:mode',
+      message: on ? '開発モードの操作欄を表示' : '開発モードを終了し撮影画面に戻した'
+    });
+    if (!on) {
+      devStateSelect.value = '';
+      resetToCamera();
+    }
+  }
+
+  /**
+   * 今映っている合成映像を写真の面に写す。撮影前の見た目を借りて、
+   * 「写真の上に処理中のおおいが出ている」状態を再現するため。
+   * @returns {boolean} 写せたか(カメラ未開始なら false)
+   */
+  function devCopyPreview() {
+    if (!preview.width || !preview.height) return false;
+    canvas.width = preview.width;
+    canvas.height = preview.height;
+    canvas.getContext('2d').drawImage(preview, 0, 0);
+    return true;
+  }
+
+  /**
+   * 撮影後の確認の状態。送信はできない(見本の写真しか無いため)。
+   */
+  function devShowConfirm() {
+    setWorking(null);
+    failure.hidden = true;
+    receipt.hidden = true;
+    stage.hidden = false;
+    showInStage(devCopyPreview() ? 'canvas' : 'camera');
+    captureBtn.hidden = true;
+    retryBtn.hidden = true;
+    sendBtn.hidden = false;
+    retakeBtn.hidden = false;
+    sendBtn.disabled = false;
+    retakeBtn.disabled = false;
+    setStatus('この写真でよろしければ「この写真を送る」を押してください');
+  }
+
+  /**
+   * 処理中の状態。
+   * @param {string} text - おおいに出す文言
+   */
+  function devShowWorking(text) {
+    failure.hidden = true;
+    receipt.hidden = true;
+    stage.hidden = false;
+    showInStage(devCopyPreview() ? 'canvas' : 'camera');
+    captureBtn.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    retryBtn.hidden = true;
+    setWorking(text);
+    setStatus('そのままお待ちください');
+  }
+
+  /**
+   * 受付が済んだ状態。番号は見本の値。
+   */
+  function devShowReceipt() {
+    setWorking(null);
+    failure.hidden = true;
+    stage.hidden = true;
+    receipt.hidden = false;
+    receiptNumber.textContent = '123';
+    captureBtn.hidden = true;
+    sendBtn.hidden = true;
+    retakeBtn.hidden = true;
+    retryBtn.hidden = true;
+    setStatus('受け付けました。次の場所へお進みください', 'done');
+  }
+
+  /**
+   * 選ばれた状態を画面に出す。
+   * 失敗の表示は自動で撮影画面へ戻るが、確認の途中で消えると困るので、
+   * 開発モードで出したものは戻さない。
+   * @param {string} value - devStateSelect の値
+   */
+  function applyDevState(value) {
+    if (!value) return;
+    const separator = value.indexOf(':');
+    const kind = value.slice(0, separator);
+    const name = value.slice(separator + 1);
+
+    if (kind === 'flow') {
+      if (name === 'camera') resetToCamera();
+      if (name === 'confirm') devShowConfirm();
+      if (name === 'sending') devShowWorking('写真を送っています');
+      if (name === 'checking') devShowWorking('お顔を確認しています');
+      if (name === 'receipt') devShowReceipt();
+    } else if (kind === 'image') {
+      // 実際の表示と同じ経路を通す。係員向けの1行もサーバーが出す形に合わせる
+      showImageFailure(
+        IMAGE_ERROR_MESSAGES[name],
+        `受付 ${DEV_SAMPLE_SEQUENCE} / ${name}: code=${name}（開発モードの見本）`
+      );
+    } else if (kind === 'tech') {
+      const item = DEV_TECHNICAL_CASES[Number(name)];
+      if (!item) return;
+      // showTechnicalFailure は処理履歴に異常として残すため、
+      // 見本の確認では同じ表示だけを出して履歴は汚さない
+      showFailure({
+        title: TECHNICAL_TITLE,
+        action: TECHNICAL_ACTION,
+        note: TECHNICAL_NOTE,
+        status: '係員をお呼びください',
+        detail: `受付 ${DEV_SAMPLE_SEQUENCE} / ${item.detail}（開発モードの見本）`
+      });
+    }
+
+    // 見本は消さずに残す
+    clearTimeout(autoResetTimer);
+  }
+
+  devStateSelect.addEventListener('change', () => applyDevState(devStateSelect.value));
+  devResetBtn.addEventListener('click', () => {
+    devStateSelect.value = '';
+    resetToCamera();
+  });
+
   /**
    * 受付を送ったあと、生成が早々に失敗しないかを短い間だけ見張る。
    * @param {string} entryId
@@ -784,8 +1037,9 @@
   cameraId = loadCameraId();
   refreshCameraList();
   applyBackgroundMode(backgroundSelect.value);
-  syncTheme();
-  setInterval(syncTheme, THEME_POLL_MS);
+  buildDevStateOptions();
+  syncDisplay();
+  setInterval(syncDisplay, THEME_POLL_MS);
   setupSegmentation();
   renderLoop();
 

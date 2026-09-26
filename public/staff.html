@@ -215,6 +215,12 @@
   .level-error { color: var(--danger); }
   .level-warn { color: #e6ad4b; }
 
+  /* 開発モード中のボタン。切り忘れに気付けるよう色を変える */
+  #devBtn.is-on {
+    border-color: #e6ad4b;
+    color: #e6ad4b;
+  }
+
   .row-del {
     min-height: 30px;
     min-width: 0;
@@ -264,9 +270,14 @@
         <button type="button" id="clearBtn">待機画面に移行</button>
         <button type="button" class="quiet" id="reloadBtn">最新の状態に更新</button>
         <button type="button" class="quiet" id="lockBtn">更新を無効にする</button>
+        <button type="button" class="quiet" id="devBtn">開発モードに入る</button>
       </div>
       <p class="now-showing" id="lockNote" hidden>
         <b class="level-error">閲覧ブースの更新は無効です。</b>「結果画面に移行」「待機画面に移行」は受け付けません。
+      </p>
+      <p class="now-showing" id="devNote" hidden>
+        <b class="level-warn">開発モード中です。</b>撮影結果が足りない分は見本の画像で埋まり、撮影ブースには状態を選ぶ欄が出ます。
+        <b>本番前に必ず終了してください。</b>
       </p>
 
       <p class="now-showing">閲覧ブース: <b id="displayMode">—</b></p>
@@ -355,6 +366,8 @@
   const displayModeEl = document.getElementById('displayMode');
   const lockBtn = document.getElementById('lockBtn');
   const lockNote = document.getElementById('lockNote');
+  const devBtn = document.getElementById('devBtn');
+  const devNote = document.getElementById('devNote');
   const reloadBtn = document.getElementById('reloadBtn');
   const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
@@ -555,13 +568,21 @@
     advanceBtn.disabled = !updatesEnabled;
     clearBtn.disabled = !updatesEnabled;
     slotCountHint.textContent = String(display.slot_count);
-    advanceBtn.textContent = `結果画面に移行（次の${display.slot_count}人）`;
+
+    devMode = display.dev_mode === true;
+    devBtn.textContent = devMode ? '開発モードを終了する' : '開発モードに入る';
+    devBtn.classList.toggle('is-on', devMode);
+    devNote.hidden = !devMode;
+    // 開発モードでは足りない分が見本で埋まるため、ボタンの文言でそれを示す
+    advanceBtn.textContent = devMode
+      ? `結果画面に移行（次の${display.slot_count}人・不足分は見本）`
+      : `結果画面に移行（次の${display.slot_count}人）`;
     // 今どちらの画面が出ているかを取り違えないよう、状態をそのまま出す
     displayModeEl.textContent = showingResults ? '結果画面' : '待機画面';
     advanceBtn.classList.toggle('primary', !showingResults);
     clearBtn.classList.toggle('primary', showingResults);
     nowShowing.textContent = display.entries.length > 0
-      ? display.entries.map((entry) => `番号 ${entry.sequence}`).join(' / ')
+      ? display.entries.map((entry) => (entry.placeholder ? `見本 ${entry.sequence}` : `番号 ${entry.sequence}`)).join(' / ')
       : 'なし';
     displayUpdated.textContent = display.updated_at ? `（${timeText(display.updated_at)} 更新）` : '';
     if (display.theme && document.activeElement !== themeSelect) {
@@ -626,6 +647,33 @@
       alert('切り替えられませんでした。通信状況を確認してください');
     } finally {
       lockBtn.disabled = false;
+    }
+  });
+
+  // 開発モードに入っているか。サーバーの値で毎回上書きする
+  let devMode = false;
+
+  devBtn.addEventListener('click', async () => {
+    // 見本が本番の表示に混ざると来場者が自分の写真を探せなくなるため、
+    // 入るときも出るときも必ず確認する
+    const next = !devMode;
+    const question = next
+      ? '開発モードに入ります。\n\n・撮影結果が足りない分は、結果画面が見本の画像で埋まります\n・撮影ブースに、表示する状態を選ぶ欄が出ます\n\n来場者がいる間は使わないでください。よろしいですか?'
+      : '開発モードを終了します。\n出している見本は片付けられます。\nよろしいですか?';
+    if (!confirm(question)) return;
+
+    devBtn.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/dev', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next })
+      }));
+      await refresh();
+    } catch (err) {
+      alert('切り替えられませんでした。通信状況を確認してください');
+    } finally {
+      devBtn.disabled = false;
     }
   });
 

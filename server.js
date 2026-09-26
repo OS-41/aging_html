@@ -281,6 +281,33 @@ let displayUpdatesEnabled = true;
 const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook', 'tamatebako'];
 let displayTheme = 'realistic';
 
+/*
+ * ---- 開発モード ----
+ *
+ * aging APIのユニットが尽きている間や、会場の設営中でまだ誰も撮影して
+ * いない間でも、各画面の見た目と切り替えを確認できるようにするための状態。
+ * 係員画面から入り、次の二つだけが変わる。
+ *
+ *  - 有効な撮影結果が無くても、結果画面を見本の画像で埋められる
+ *  - 撮影ブースに、表示する状態を選ぶ欄が出る(撮影ブース側だけの表示)
+ *
+ * 見本の画像はサーバーが生成するSVGで、aging APIは一切呼ばない。
+ * 本番中に入ったままにならないよう、係員画面と閲覧ブースの両方に
+ * 開発モードである旨を出す。
+ */
+let devMode = false;
+
+// 結果画面のうち、見本で埋めている区画の数(開発モードのときだけ0より大きい)
+let displayPlaceholders = 0;
+
+// 見本画像の寸法。よくあるWebカメラのフレーム(4:3)に合わせてある。
+// 閲覧ブースは最初に届いた画像の縦横比で区画を組み直すため、見本でも
+// 本番に近い並びが確認できる。
+const DEV_PLACEHOLDER_SIZE = { width: 1440, height: 1080 };
+
+// 見本の区画をひと目で見分けられるよう、順番に色を変える
+const DEV_PLACEHOLDER_COLORS = ['#2f4858', '#33658a', '#55828b', '#7a5c61', '#86644b', '#4f6457'];
+
 // ---- 処理履歴 ----
 // 係員が会場でトラブルを追えるよう、サーバーの処理とクライアント(各ブースの
 // ブラウザ)の通信結果を同じ時系列に残す。ステータスコードとエラーメッセージも含める。
@@ -392,7 +419,37 @@ function entriesInOrder() {
 }
 
 /**
+ * 開発モードで結果画面を埋めるための見本を、閲覧ブースに渡す形で作る。
+ * 実体は無く、画像だけを /api/dev/placeholder/:index が返す。
+ * @param {number} index - 0から始まる区画の位置
+ */
+function placeholderEntry(index) {
+  const at = new Date(displayUpdatedAtMs || Date.now()).toISOString();
+  return {
+    id: `dev-placeholder-${index}`,
+    sequence: index + 1,
+    status: 'ready',
+    error: null,
+    error_code: null,
+    // 閲覧ブースがこれを見て「見本」と分かるようにする
+    placeholder: true,
+    files: [],
+    captured_at: at,
+    viewed_at: at,
+    age: null,
+    age_idx: null,
+    age_min: null,
+    age_max: null,
+    outputs: [{
+      res_age: SAVED_RESULT_AGE === null ? 70 : SAVED_RESULT_AGE,
+      url: `${BASE_PATH}/api/dev/placeholder/${index}`
+    }]
+  };
+}
+
+/**
  * 閲覧ブースに映している内容。期限切れで消えた受付は除いて返す。
+ * 開発モードで見本を出している場合は、そのぶんを後ろに足して返す。
  */
 function currentDisplay() {
   const entries = displayBatch
@@ -400,11 +457,20 @@ function currentDisplay() {
     .filter(Boolean)
     .map(toPublicEntry);
 
+  // 見本は実際の受付の後ろに並べる。開発モードを抜けたら数が0になるので、
+  // 本番の表示に見本が混ざることはない。
+  const placeholders = devMode ? Math.min(displayPlaceholders, DISPLAY_SLOT_COUNT - entries.length) : 0;
+  for (let i = 0; i < placeholders; i++) {
+    entries.push(placeholderEntry(entries.length));
+  }
+
   return {
     slot_count: DISPLAY_SLOT_COUNT,
     updated_at: displayUpdatedAtMs ? new Date(displayUpdatedAtMs).toISOString() : null,
     mode: displayMode,
     updates_enabled: displayUpdatesEnabled,
+    dev_mode: devMode,
+    placeholders,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
     entries
@@ -489,6 +555,45 @@ function isJpegFile(filePath) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/*
+ * aging APIが返す技術的なエラー。いずれも来場者の姿勢では直らない。
+ * 係員が「課金の問題か、設定の誤りか、鍵の問題か」を処理履歴だけで
+ * 判別できるよう、日本語の説明を添える。
+ */
+const AGING_API_ERRORS = {
+  InvalidParameters: 'リクエストの内容が不正です',
+  CreditInsufficiency: 'APIのユニットが不足しています(追加購入が必要)',
+  BadRequest: '想定外のリクエスト内容です',
+  InvalidStyleGroup: 'スタイルグループIDが不正です',
+  InvalidStyle: 'スタイルIDが不正です'
+};
+
+// 本文にコードが無く、HTTPステータスだけで分かるもの
+const AGING_API_STATUS_ERRORS = {
+  400: 'リクエストが不正です(task_idの誤りを含む)',
+  401: 'APIキーが無効です',
+  429: 'リクエストが多すぎます(レート制限)',
+  500: 'aging API側で処理が時間切れになりました'
+};
+
+/**
+ * エラーコードとHTTPステータスから、係員向けの一行を組み立てる。
+ * @param {string|null} code
+ * @param {number|null} status
+ * @param {string} message - APIが返した説明
+ */
+function describeAgingError(code, status, message) {
+  const known = code && AGING_API_ERRORS[code];
+  const byStatus = status && AGING_API_STATUS_ERRORS[status];
+  const parts = [];
+  if (known) parts.push(known);
+  else if (byStatus) parts.push(byStatus);
+  if (code) parts.push(`code=${code}`);
+  if (status) parts.push(`HTTP ${status}`);
+  if (message && message !== code) parts.push(message);
+  return parts.join(' / ');
+}
+
 /**
  * aging APIの応答からエラーコードと説明を取り出す。
  * コード(error_face_angle_upward など)は撮影ブースで来場者向けの
@@ -520,21 +625,21 @@ async function startAgingTask(srcFileUrl, sequence) {
 
   const payload = await res.json().catch(() => ({}));
   const taskId = payload?.data?.task_id;
-  recordAgingApiCall(res.status, taskId ? null : 'task_idが返りませんでした');
-  addLog({
-    level: taskId ? 'info' : 'error',
-    event: 'aging:start',
-    status: res.status,
-    sequence,
-    message: taskId ? `task_id=${taskId}` : JSON.stringify(payload).slice(0, 200)
-  });
 
   if (!taskId) {
+    // 原因を1行にまとめてから記録する。ユニット不足と鍵の誤りとレート制限は
+    // 対処がまるで違うため、係員画面でそのまま読めるようにしておく。
     const { code, message } = agingErrorFrom(payload);
-    const err = new Error(`タスクを開始できませんでした (${res.status}): ${message}`);
+    const described = describeAgingError(code, res.status, message);
+    recordAgingApiCall(res.status, described);
+    addLog({ level: 'error', event: 'aging:start', status: res.status, sequence, message: described });
+    const err = new Error(`タスクを開始できませんでした: ${described}`);
     err.code = code;
     throw err;
   }
+
+  recordAgingApiCall(res.status);
+  addLog({ event: 'aging:start', status: res.status, sequence, message: `task_id=${taskId}` });
   return taskId;
 }
 
@@ -557,7 +662,7 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
     }
     if (taskStatus === 'error') {
       const { code, message } = agingErrorFrom(payload);
-      const detail = code ? `${message} (${code})` : message;
+      const detail = describeAgingError(code, null, message);
       recordAgingApiCall(res.status, detail);
       addLog({ level: 'error', event: 'aging:failed', status: res.status, sequence, message: detail });
       const err = new Error(detail);
@@ -565,7 +670,14 @@ async function pollAgingTask(taskId, sequence, { intervalMs = 3000, maxAttempts 
       throw err;
     }
     if (!res.ok) {
-      addLog({ level: 'warn', event: 'aging:poll', status: res.status, sequence, message: `想定外の応答 (${attempt}回目)` });
+      const { code, message } = agingErrorFrom(payload);
+      addLog({
+        level: 'warn',
+        event: 'aging:poll',
+        status: res.status,
+        sequence,
+        message: `${attempt}回目: ${describeAgingError(code, res.status, message)}`
+      });
     }
 
     await sleep(intervalMs);
@@ -777,7 +889,9 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
     .slice(0, DISPLAY_SLOT_COUNT);
 
-  if (next.length === 0) {
+  // 開発モードでは、足りないぶんを見本で埋めて結果画面を出せる。
+  // 通常は1件も無ければ何もしない(誤って空の結果画面を出さないため)。
+  if (next.length === 0 && !devMode) {
     addLog({ level: 'warn', event: 'display:advance', message: '表示できる受付がありませんでした' });
     return res.status(409).json({ error: '表示できる受付がありません', ...currentDisplay() });
   }
@@ -787,12 +901,15 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     entry.viewedAtMs = now;
   }
   displayBatch = next.map((entry) => entry.id);
+  displayPlaceholders = devMode ? DISPLAY_SLOT_COUNT - next.length : 0;
   displayUpdatedAtMs = now;
   displayMode = 'results';
 
+  const shown = next.length > 0 ? `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示` : '受付なし';
   addLog({
+    level: displayPlaceholders > 0 ? 'warn' : 'info',
     event: 'display:advance',
-    message: `番号 ${next.map((entry) => entry.sequence).join(', ')} を表示`
+    message: displayPlaceholders > 0 ? `${shown}(開発モード: 見本 ${displayPlaceholders}件を追加)` : shown
   });
   res.json(currentDisplay());
 });
@@ -825,6 +942,7 @@ router.post('/api/display/clear', requireBasicAuth, (req, res) => {
   }
 
   displayBatch = [];
+  displayPlaceholders = 0;
   displayUpdatedAtMs = Date.now();
   displayMode = 'waiting';
   addLog({ event: 'display:clear', message: '待機画面に移行' });
@@ -849,6 +967,67 @@ router.post('/api/display/updates', requireBasicAuth, (req, res) => {
     message: enabled ? '閲覧ブースの更新を有効化' : '閲覧ブースの更新を無効化'
   });
   res.json(currentDisplay());
+});
+
+/**
+ * POST /api/dev
+ * 開発モードの出入り(係員用)。
+ * 抜けるときは、出していた見本をその場で片付ける。
+ * body: { "enabled": true | false }
+ */
+router.post('/api/dev', requireBasicAuth, (req, res) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled には true か false を指定してください' });
+  }
+
+  devMode = enabled;
+  if (!devMode && displayPlaceholders > 0) {
+    // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
+    displayPlaceholders = 0;
+    if (displayBatch.length === 0) {
+      displayMode = 'waiting';
+    }
+    displayUpdatedAtMs = Date.now();
+  }
+
+  addLog({
+    level: enabled ? 'warn' : 'info',
+    event: 'dev:mode',
+    message: enabled ? '開発モードに移行(見本での表示を許可)' : '開発モードを終了'
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * GET /api/dev/placeholder/:index
+ * 開発モードで結果画面を埋める見本画像。SVGをその場で組んで返すため、
+ * aging APIもディスクも使わない。開発モードでないときは返さない。
+ */
+router.get('/api/dev/placeholder/:index', requireBasicAuth, (req, res) => {
+  if (!devMode) {
+    return res.status(409).json({ error: '開発モードではありません' });
+  }
+
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0 || index >= DISPLAY_SLOT_COUNT) {
+    return res.status(404).json({ error: '見本の番号が範囲外です' });
+  }
+
+  const { width, height } = DEV_PLACEHOLDER_SIZE;
+  const color = DEV_PLACEHOLDER_COLORS[index % DEV_PLACEHOLDER_COLORS.length];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+    + `<rect width="${width}" height="${height}" fill="${color}"/>`
+    + `<rect x="24" y="24" width="${width - 48}" height="${height - 48}" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="8" stroke-dasharray="32 24"/>`
+    + `<text x="50%" y="42%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.22)}" font-weight="bold" fill="#ffffff">${index + 1}</text>`
+    + `<text x="50%" y="60%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.075)}" fill="#ffffff" fill-opacity="0.9">開発モードの見本</text>`
+    + `<text x="50%" y="70%" text-anchor="middle" font-family="sans-serif" font-size="${Math.round(height * 0.05)}" fill="#ffffff" fill-opacity="0.75">${width} × ${height}</text>`
+    + '</svg>';
+
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(svg);
 });
 
 /**

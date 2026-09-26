@@ -57,6 +57,26 @@
     color: var(--muted);
     font-size: clamp(16px, 1.6vw, 22px);
   }
+  /* 開発モードの見本。本番の写真と見間違えないよう枠で示す */
+  .slot.is-placeholder {
+    outline: 3px dashed rgba(255, 196, 0, 0.9);
+    outline-offset: -3px;
+  }
+
+  /* 開発モードである旨。会場で出したままにしないための目印 */
+  .dev-banner {
+    position: fixed;
+    right: 12px;
+    top: 0;
+    z-index: 30;
+    padding: 5px 14px;
+    border-radius: 0 0 12px 12px;
+    background: rgba(255, 196, 0, 0.92);
+    color: #1b1b1b;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
 
   /* 番号は写真の左上に重ねる。読めるよう背景を敷く */
   .slot-number {
@@ -307,6 +327,7 @@
     <div class="layer" data-layer="smoke"></div>
   </div>
   <canvas id="ocean"></canvas>
+  <div class="dev-banner" id="devBanner" hidden>開発モード（表示は見本です）</div>
   <div class="booth">
     <div class="booth-header">
       <h1>未来のあなた</h1>
@@ -327,6 +348,7 @@
 <script src="tamatebako-scene.js"></script>
 <script>
   const slotsEl = document.getElementById('slots');
+  const devBanner = document.getElementById('devBanner');
   const subtitle = document.getElementById('subtitle');
   const updatedAtEl = document.getElementById('updatedAt');
 
@@ -408,6 +430,8 @@
   function buildSlot(entry) {
     const slot = document.createElement('div');
     slot.className = 'slot';
+    // 開発モードで埋めた見本。番号も写真も本物ではない
+    if (entry.placeholder) slot.classList.add('is-placeholder');
 
     const header = document.createElement('div');
     header.className = 'slot-number';
@@ -416,7 +440,7 @@
     num.textContent = String(entry.sequence);
     const label = document.createElement('span');
     label.className = 'label';
-    label.textContent = '番の方';
+    label.textContent = entry.placeholder ? '番（見本）' : '番の方';
     header.append(num, label);
 
     const photos = document.createElement('div');
@@ -472,6 +496,8 @@
   function render(display) {
     // 待機画面のときは背景の演出だけにする。区画は組み立てず、枠も出さない
     const showingResults = display.mode === 'results';
+    // 開発モード中は画面の上端に出し続ける。本番で出したままにしないため
+    devBanner.hidden = !display.dev_mode;
     slotsEl.classList.toggle('is-waiting', !showingResults);
 
     if (showingResults) {
