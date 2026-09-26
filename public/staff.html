@@ -78,21 +78,67 @@
   [data-panel="storage"] .table-scroll { max-height: 44vh; }
   [data-panel="logs"] .table-scroll { max-height: 58vh; }
 
+  /* ---- 欄の殻 ---- */
+  /*
+   * 移動と高さのつまみは <summary> の中に置かない。
+   * <summary> の中の操作要素はブラウザによって扱いが違い、
+   * 押しても開閉だけが起きて、つまみとして働かないことがあるため。
+   * 欄(<details>)とつまみをこの殻がまとめ、つまみは殻に対して置く。
+   */
+  .panel-shell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--surface);
+    border-radius: 14px;
+  }
+  .panel-shell > .panel { background: transparent; }
+  /* 見出しの右端は移動のつまみの場所。文字が重ならないよう空けておく */
+  .panel-shell > .panel > summary { padding-right: 86px; }
+
+  /* 移動のつまみ。畳んだ欄でも押せるよう、殻の右上に重ねて置く */
+  .panel-shell > .drag {
+    position: absolute;
+    top: 13px;
+    right: 16px;
+    z-index: 2;
+    min-height: 0;
+    min-width: 0;
+    padding: 2px 9px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    cursor: grab;
+    /* 指でも動かせるようにする(iPadでの操作用) */
+    touch-action: none;
+  }
+  .panel-shell > .drag:active { cursor: grabbing; }
+  .panel-shell.is-dragging {
+    opacity: 0.5;
+    outline: 2px dashed var(--accent);
+    outline-offset: 2px;
+  }
+
   /* ---- 欄の高さ ---- */
   /* 下端のつまみで高さを決めたら、その中で本文を送る */
   .panel[open] {
     display: flex;
     flex-direction: column;
+    min-height: 0;
   }
   .panel[open] > .panel-body { min-height: 0; }
-  .panel.is-sized > .panel-body {
+  .panel-shell.is-sized > .panel { flex: 1; min-height: 0; }
+  .panel-shell.is-sized .panel-body {
     flex: 1;
     overflow: auto;
   }
-  .panel.is-sized .table-scroll { max-height: none; }
+  .panel-shell.is-sized .table-scroll { max-height: none; }
   .panel-resize {
-    margin: 8px -20px -18px;
-    height: 13px;
+    height: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -109,35 +155,12 @@
     background: var(--line);
   }
   .panel-resize:hover::before,
-  .panel.is-resizing .panel-resize::before { background: var(--accent); }
-  .panel:not([open]) .panel-resize { display: none; }
-  .panel.is-resizing { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .panel-shell.is-resizing .panel-resize::before { background: var(--accent); }
+  /* 畳んでいる欄の高さは変えられない */
+  .panel-shell.is-closed .panel-resize { display: none; }
+  .panel-shell.is-resizing { outline: 2px solid var(--accent); outline-offset: 2px; }
   body.is-resizing-panel { cursor: ns-resize; user-select: none; -webkit-user-select: none; }
 
-  /* ---- 欄の並べ替え ---- */
-  /* つまみを持って動かす。見出しを押すと開閉してしまうので、
-     つまみの上での操作は開閉に渡さない */
-  .panel > summary .drag {
-    margin-left: auto;
-    min-height: 0;
-    min-width: 0;
-    padding: 2px 9px;
-    font-size: 13px;
-    line-height: 1.4;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    cursor: grab;
-    /* 指でも動かせるようにする(iPadでの操作用) */
-    touch-action: none;
-  }
-  .panel > summary .drag:active { cursor: grabbing; }
-  .panel.is-dragging {
-    opacity: 0.5;
-    outline: 2px dashed var(--accent);
-    outline-offset: 2px;
-  }
   /* 移動先の目印。隣り合う位置に吸い付き、そこを青く光らせる */
   .drop-mark {
     position: absolute;
@@ -453,11 +476,9 @@
     -->
     <div class="console" id="console">
 
-    <details class="panel" data-panel="control" open>
-      <summary>
-        <h2>表示の制御</h2>
-        <button type="button" class="drag" aria-label="表示の制御の欄を移動">⠿ 移動</button>
-      </summary>
+    <div class="panel-shell" data-panel="control">
+      <details class="panel" open>
+        <summary><h2>表示の制御</h2></summary>
       <div class="panel-body">
       <p class="hint">
         「結果画面に移行」で、まだ表示していない古い順に<span id="slotCountHint">—</span>人分をまとめて閲覧ブースへ出します。
@@ -499,14 +520,14 @@
         </select>
       </p>
     </div>
+      </details>
+      <button type="button" class="drag" aria-label="表示の制御の欄を移動">⠿ 移動</button>
       <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
-    </details>
+    </div>
 
-    <details class="panel" data-panel="clients" open>
-      <summary>
-        <h2>通信状況</h2>
-        <button type="button" class="drag" aria-label="通信状況の欄を移動">⠿ 移動</button>
-      </summary>
+    <div class="panel-shell" data-panel="clients">
+      <details class="panel" open>
+        <summary><h2>通信状況</h2></summary>
       <div class="panel-body">
       <p class="hint">各ブースの画面からの応答と、aging APIとの通信結果。</p>
       <div class="table-scroll">
@@ -520,14 +541,14 @@
       <p class="empty" id="clientEmpty">接続中の画面はありません</p>
       <p class="now-showing" id="apiStatus">aging API: —</p>
     </div>
+      </details>
+      <button type="button" class="drag" aria-label="通信状況の欄を移動">⠿ 移動</button>
       <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
-    </details>
+    </div>
 
-    <details class="panel" data-panel="storage" open>
-      <summary>
-        <h2>保管中の写真</h2>
-        <button type="button" class="drag" aria-label="保管中の写真の欄を移動">⠿ 移動</button>
-      </summary>
+    <div class="panel-shell" data-panel="storage">
+      <details class="panel" open>
+        <summary><h2>保管中の写真</h2></summary>
       <div class="panel-body">
       <p class="hint">
         写真そのものは表示しません。ファイル名と撮影時刻のみ。
@@ -545,14 +566,14 @@
       </div>
       <p class="empty" id="entryEmpty">保管中の写真はありません</p>
     </div>
+      </details>
+      <button type="button" class="drag" aria-label="保管中の写真の欄を移動">⠿ 移動</button>
       <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
-    </details>
+    </div>
 
-    <details class="panel" data-panel="logs" open>
-      <summary>
-        <h2>処理履歴</h2>
-        <button type="button" class="drag" aria-label="処理履歴の欄を移動">⠿ 移動</button>
-      </summary>
+    <div class="panel-shell" data-panel="logs">
+      <details class="panel" open>
+        <summary><h2>処理履歴</h2></summary>
       <div class="panel-body">
       <p class="hint">
         サーバーと各ブースのブラウザ双方の記録。
@@ -570,8 +591,10 @@
       </div>
       <p class="empty" id="logEmpty">履歴はまだありません</p>
     </div>
+      </details>
+      <button type="button" class="drag" aria-label="処理履歴の欄を移動">⠿ 移動</button>
       <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
-    </details>
+    </div>
 
     </div>
   </div>
@@ -1078,9 +1101,12 @@
   //
   // 欄は縦の列に積む。列の中では上から詰まるので、隣の欄が縦に長くても
   // 下に空きができない。列の数は係員が1〜4から選ぶ。
-  // 見出し右の「⠿ 移動」で欄を運び、下端のつまみで高さを決める。
+  // 右上の「⠿ 移動」で欄を運び、下端のつまみで高さを決める。
   // 並び・列数・高さは端末に記憶する。
-  // マウスでも指でも同じ操作になるよう、どちらも Pointer Events で扱う。
+  //
+  // 動かしている間の pointermove / pointerup は window で受ける。
+  // setPointerCapture に任せると、つまみから指が外れた時点で動きが
+  // 届かなくなるブラウザがあり、つまんでも何も起きないため。
 
   const consoleEl = document.getElementById('console');
   const columnSelect = document.getElementById('columnSelect');
@@ -1101,33 +1127,41 @@
   };
 
   // 画面に出ている全部の欄(並べ替えても同じものを指す)
-  const allPanels = [...consoleEl.querySelectorAll('.panel[data-panel]')];
-  const panelByName = new Map(allPanels.map((panel) => [panel.dataset.panel, panel]));
+  const allShells = [...consoleEl.querySelectorAll('.panel-shell[data-panel]')];
+  const shellByName = new Map(allShells.map((shell) => [shell.dataset.panel, shell]));
+  const detailsOf = (shell) => shell.querySelector('.panel');
 
   let layout = loadLayout();
   let drag = null;
   let resize = null;
 
   function loadLayout() {
+    let saved = null;
     try {
-      const saved = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null');
-      if (saved && Array.isArray(saved.order)) {
-        return {
-          columns: Math.min(MAX_COLUMNS, Math.max(1, Number(saved.columns) || DEFAULT_LAYOUT.columns)),
-          order: saved.order.map((column) => (Array.isArray(column) ? column.filter((name) => panelByName.has(name)) : [])),
-          heights: saved.heights && typeof saved.heights === 'object' ? saved.heights : {}
-        };
-      }
+      saved = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null');
     } catch (err) {
-      // 保存が読めない環境では既定の並びで始める
+      saved = null;
     }
-    return structuredClone(DEFAULT_LAYOUT);
+    if (!saved || !Array.isArray(saved.order)) return defaultLayout();
+    return {
+      columns: Math.min(MAX_COLUMNS, Math.max(1, Number(saved.columns) || DEFAULT_LAYOUT.columns)),
+      order: saved.order.map((column) => (Array.isArray(column) ? column.filter((name) => shellByName.has(name)) : [])),
+      heights: saved.heights && typeof saved.heights === 'object' ? saved.heights : {}
+    };
+  }
+
+  function defaultLayout() {
+    return {
+      columns: DEFAULT_LAYOUT.columns,
+      order: DEFAULT_LAYOUT.order.map((column) => [...column]),
+      heights: {}
+    };
   }
 
   function saveLayout() {
     // 画面のいまの並びをそのまま書き出す
     layout.order = [...consoleEl.querySelectorAll('.console-col')]
-      .map((column) => [...column.querySelectorAll('.panel[data-panel]')].map((panel) => panel.dataset.panel));
+      .map((column) => [...column.querySelectorAll('.panel-shell[data-panel]')].map((shell) => shell.dataset.panel));
     try {
       localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
     } catch (err) {
@@ -1154,33 +1188,35 @@
       // 列を減らしたときは、はみ出したぶんを最後の列へ
       const column = columns[Math.min(index, columns.length - 1)];
       for (const name of names) {
-        const panel = panelByName.get(name);
-        if (!panel || placed.has(name)) continue;
-        column.append(panel);
+        const shell = shellByName.get(name);
+        if (!shell || placed.has(name)) continue;
+        column.append(shell);
         placed.add(name);
       }
     });
-    for (const panel of allPanels) {
-      if (!placed.has(panel.dataset.panel)) columns[columns.length - 1].append(panel);
+    for (const shell of allShells) {
+      if (!placed.has(shell.dataset.panel)) columns[columns.length - 1].append(shell);
     }
 
     consoleEl.replaceChildren(...columns);
     columnSelect.value = String(layout.columns);
-    for (const panel of allPanels) applyPanelHeight(panel);
+    for (const shell of allShells) applyPanelHeight(shell);
   }
 
   /**
-   * 記憶している高さを欄に当てる。閉じている欄には当てない
+   * 記憶している高さを欄に当てる。畳んでいる欄には当てない
    * (畳んだあとに背の高い空き箱が残らないようにするため)。
    */
-  function applyPanelHeight(panel) {
-    const height = layout.heights[panel.dataset.panel];
-    if (height && panel.open) {
-      panel.style.height = `${height}px`;
-      panel.classList.add('is-sized');
+  function applyPanelHeight(shell) {
+    const open = detailsOf(shell).open;
+    const height = layout.heights[shell.dataset.panel];
+    shell.classList.toggle('is-closed', !open);
+    if (height && open) {
+      shell.style.height = `${height}px`;
+      shell.classList.add('is-sized');
     } else {
-      panel.style.height = '';
-      panel.classList.remove('is-sized');
+      shell.style.height = '';
+      shell.classList.remove('is-sized');
     }
   }
 
@@ -1203,19 +1239,19 @@
     };
 
     for (const column of columnsInOrder()) {
-      const panels = [...column.querySelectorAll('.panel[data-panel]')].filter((panel) => panel !== dragged);
-      if (panels.length === 0) {
+      const shells = [...column.querySelectorAll('.panel-shell[data-panel]')].filter((shell) => shell !== dragged);
+      if (shells.length === 0) {
         // 空の列。そこへ置ける
         const rect = column.getBoundingClientRect();
         consider({ kind: 'column', column, rect, point: { x: rect.left + rect.width / 2, y: rect.top + 20 } });
         continue;
       }
-      for (const panel of panels) {
-        const rect = panel.getBoundingClientRect();
+      for (const shell of shells) {
+        const rect = shell.getBoundingClientRect();
         for (const side of ['before', 'after']) {
           consider({
-            kind: 'panel',
-            panel,
+            kind: 'shell',
+            shell,
             side,
             rect,
             point: { x: rect.left + rect.width / 2, y: side === 'before' ? rect.top : rect.bottom }
@@ -1246,7 +1282,7 @@
 
   function beginDrag() {
     drag.active = true;
-    drag.panel.classList.add('is-dragging');
+    drag.shell.classList.add('is-dragging');
     document.body.classList.add('is-reordering');
     drag.mark = document.createElement('div');
     drag.mark.className = 'drop-mark';
@@ -1255,156 +1291,160 @@
 
   function endDrag(commit) {
     if (!drag) return;
-    const { panel, mark, target, active } = drag;
+    const { shell, mark, target, active } = drag;
     drag = null;
 
-    panel.classList.remove('is-dragging');
+    shell.classList.remove('is-dragging');
     document.body.classList.remove('is-reordering');
     if (mark) mark.remove();
     if (!active || !commit || !target) return;
 
-    if (target.kind === 'column') target.column.append(panel);
-    else if (target.side === 'before') target.panel.before(panel);
-    else target.panel.after(panel);
+    if (target.kind === 'column') target.column.append(shell);
+    else if (target.side === 'before') target.shell.before(shell);
+    else target.shell.after(shell);
     saveLayout();
   }
 
   /**
    * 欄を1つ分だけ動かす(つまみにフォーカスした状態の矢印キー用)。
    * 上下は同じ列の中で、左右は隣の列の同じ高さへ移す。
-   * @param {HTMLElement} panel
+   * @param {HTMLElement} shell
    * @param {string} key
    */
-  function movePanelByKey(panel, key) {
-    const column = panel.parentElement;
-    const inColumn = [...column.querySelectorAll('.panel[data-panel]')];
-    const index = inColumn.indexOf(panel);
+  function movePanelByKey(shell, key) {
+    const column = shell.parentElement;
+    const inColumn = [...column.querySelectorAll('.panel-shell[data-panel]')];
+    const index = inColumn.indexOf(shell);
 
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       const next = index + (key === 'ArrowUp' ? -1 : 1);
       if (next < 0 || next >= inColumn.length) return;
-      if (key === 'ArrowUp') inColumn[next].before(panel);
-      else inColumn[next].after(panel);
+      if (key === 'ArrowUp') inColumn[next].before(shell);
+      else inColumn[next].after(shell);
     } else {
       const columns = columnsInOrder();
       const columnIndex = columns.indexOf(column) + (key === 'ArrowLeft' ? -1 : 1);
       if (columnIndex < 0 || columnIndex >= columns.length) return;
       const target = columns[columnIndex];
-      const siblings = [...target.querySelectorAll('.panel[data-panel]')];
+      const siblings = [...target.querySelectorAll('.panel-shell[data-panel]')];
       // だいたい同じ高さの位置に入れる
-      if (siblings[index]) siblings[index].before(panel);
-      else target.append(panel);
+      if (siblings[index]) siblings[index].before(shell);
+      else target.append(shell);
     }
     saveLayout();
-    panel.querySelector('summary .drag')?.focus();
+    shell.querySelector('.drag')?.focus();
   }
 
   // ---- 高さの変更 ----
 
-  function beginResize(panel, handle, event) {
+  function beginResize(shell, event) {
     resize = {
-      panel,
+      shell,
       pointerId: event.pointerId,
       startY: event.clientY,
-      startHeight: panel.getBoundingClientRect().height
+      startHeight: shell.getBoundingClientRect().height,
+      height: 0
     };
-    handle.setPointerCapture(event.pointerId);
-    panel.classList.add('is-resizing');
+    shell.classList.add('is-resizing');
     document.body.classList.add('is-resizing-panel');
   }
 
   function updateResize(y) {
     const height = Math.max(MIN_PANEL_HEIGHT, Math.round(resize.startHeight + (y - resize.startY)));
-    resize.panel.style.height = `${height}px`;
-    resize.panel.classList.add('is-sized');
+    resize.shell.style.height = `${height}px`;
+    resize.shell.classList.add('is-sized');
     resize.height = height;
   }
 
   function endResize(commit) {
     if (!resize) return;
-    const { panel, height } = resize;
+    const { shell, height } = resize;
     resize = null;
-    panel.classList.remove('is-resizing');
+    shell.classList.remove('is-resizing');
     document.body.classList.remove('is-resizing-panel');
     if (!commit || !height) return;
-    layout.heights[panel.dataset.panel] = height;
+    layout.heights[shell.dataset.panel] = height;
     saveLayout();
   }
 
   /**
    * 決めた高さを捨てて、中身に合わせた高さへ戻す。
    */
-  function clearPanelHeight(panel) {
-    delete layout.heights[panel.dataset.panel];
-    applyPanelHeight(panel);
+  function clearPanelHeight(shell) {
+    delete layout.heights[shell.dataset.panel];
+    applyPanelHeight(shell);
     saveLayout();
   }
 
   // ---- 各欄への割り当て ----
 
-  for (const panel of allPanels) {
-    const handle = panel.querySelector('summary .drag');
-    const grip = panel.querySelector('.panel-resize');
-
-    // つまみの上での押下は、見出しの開閉に渡さない
-    handle.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
+  for (const shell of allShells) {
+    const handle = shell.querySelector('.drag');
+    const grip = shell.querySelector('.panel-resize');
 
     handle.addEventListener('pointerdown', (event) => {
       if (event.button !== undefined && event.button !== 0) return;
       event.preventDefault();
-      event.stopPropagation();
-      handle.setPointerCapture(event.pointerId);
-      drag = { panel, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false, target: null, mark: null };
+      drag = {
+        shell,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        target: null,
+        mark: null
+      };
     });
-
-    handle.addEventListener('pointermove', (event) => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      if (!drag.active) {
-        // 少し動かしてから移動を始める(押しただけで並びが変わらないように)
-        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
-        beginDrag();
-      }
-      const target = dropTargetAt(event.clientX, event.clientY, drag.panel);
-      if (!target) return;
-      drag.target = target;
-      showDropMark(target);
-    });
-
-    handle.addEventListener('pointerup', (event) => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      endDrag(true);
-    });
-    handle.addEventListener('pointercancel', () => endDrag(false));
 
     handle.addEventListener('keydown', (event) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       event.preventDefault();
-      movePanelByKey(panel, event.key);
+      movePanelByKey(shell, event.key);
     });
 
     grip.addEventListener('pointerdown', (event) => {
       if (event.button !== undefined && event.button !== 0) return;
       event.preventDefault();
-      beginResize(panel, grip, event);
+      beginResize(shell, event);
     });
-    grip.addEventListener('pointermove', (event) => {
-      if (!resize || event.pointerId !== resize.pointerId) return;
-      updateResize(event.clientY);
-    });
-    grip.addEventListener('pointerup', (event) => {
-      if (!resize || event.pointerId !== resize.pointerId) return;
-      endResize(true);
-    });
-    grip.addEventListener('pointercancel', () => endResize(false));
     // 2回押すと、決めた高さを捨てて中身に合わせる
-    grip.addEventListener('dblclick', () => clearPanelHeight(panel));
+    grip.addEventListener('dblclick', () => clearPanelHeight(shell));
 
     // 畳んだ欄には高さを当てない。開いたら記憶していた高さに戻す
-    panel.addEventListener('toggle', () => applyPanelHeight(panel));
+    detailsOf(shell).addEventListener('toggle', () => applyPanelHeight(shell));
   }
+
+  // 動かしている間はwindowで受ける。つまみの外へ出ても届かせるため
+  window.addEventListener('pointermove', (event) => {
+    if (drag && event.pointerId === drag.pointerId) {
+      if (!drag.active) {
+        // 少し動かしてから移動を始める(押しただけで並びが変わらないように)
+        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+        beginDrag();
+      }
+      event.preventDefault();
+      const target = dropTargetAt(event.clientX, event.clientY, drag.shell);
+      if (target) {
+        drag.target = target;
+        showDropMark(target);
+      }
+      return;
+    }
+    if (resize && event.pointerId === resize.pointerId) {
+      event.preventDefault();
+      updateResize(event.clientY);
+    }
+  });
+
+  window.addEventListener('pointerup', (event) => {
+    if (drag && event.pointerId === drag.pointerId) endDrag(true);
+    if (resize && event.pointerId === resize.pointerId) endResize(true);
+  });
+
+  window.addEventListener('pointercancel', () => {
+    endDrag(false);
+    endResize(false);
+  });
 
   columnSelect.addEventListener('change', () => {
     layout.columns = Math.min(MAX_COLUMNS, Math.max(1, Number(columnSelect.value) || 1));
@@ -1413,7 +1453,7 @@
   });
 
   layoutResetBtn.addEventListener('click', () => {
-    layout = structuredClone(DEFAULT_LAYOUT);
+    layout = defaultLayout();
     applyLayout();
     saveLayout();
   });
@@ -1439,24 +1479,24 @@
       return;
     }
     if (!Array.isArray(closed)) return;
-    for (const panel of document.querySelectorAll('.panel[data-panel]')) {
-      panel.open = !closed.includes(panel.dataset.panel);
+    for (const shell of allShells) {
+      detailsOf(shell).open = !closed.includes(shell.dataset.panel);
     }
   }
 
   function savePanels() {
     try {
-      const closed = [...document.querySelectorAll('.panel[data-panel]')]
-        .filter((panel) => !panel.open)
-        .map((panel) => panel.dataset.panel);
+      const closed = allShells
+        .filter((shell) => !detailsOf(shell).open)
+        .map((shell) => shell.dataset.panel);
       localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(closed));
     } catch (err) {
       // 保存できなくても、そのセッション中の開閉は効く
     }
   }
 
-  for (const panel of document.querySelectorAll('.panel[data-panel]')) {
-    panel.addEventListener('toggle', savePanels);
+  for (const shell of allShells) {
+    detailsOf(shell).addEventListener('toggle', savePanels);
   }
   restorePanels();
 
