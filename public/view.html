@@ -262,10 +262,12 @@
     height: 84%;
     flex: none;
     gap: 14px;
-    transition: opacity 0.9s ease;
+    /* 見え始めるのは煙が晴れるからで、区画そのものは淡く出さない。
+       ここに遷移をかけると、煙とは別に浮き上がって見えてしまう */
+    transition: none;
   }
-  /* 煙に覆われている間は写真を隠し、その隙に中身を入れ替える */
-  body.is-tamatebako .slots.is-veiled { opacity: 0; transition: none; }
+  /* 煙が立ちのぼりきるまでは出さない。覆われてから煙の下に置く */
+  body.is-tamatebako .slots.is-veiled { opacity: 0; }
   body.is-tamatebako .slot {
     background: rgba(255, 255, 255, 0.5);
     border-radius: 20px;
@@ -622,8 +624,8 @@
   }
 
   /**
-   * 玉手箱の演出。煙が画面を覆っている隙に写真を入れ替え、
-   * 煙が晴れてしばらくしてから写真へ寄る。
+   * 玉手箱の演出。ふたを開け、煙で画面を埋め尽くし、覆われている隙に
+   * 背景と結果を入れ替えて、煙が晴れる中で結果が現れるようにする。
    */
   function playReveal(display) {
     pendingDisplay = display;
@@ -635,31 +637,42 @@
   /**
    * tamatebako-scene.js から演出の各段階を受け取る。
    *
-   * 差し替えを veiled だけに任せると、描画が飛んだときに写真が出ないまま
-   * 演出が終わってしまう。veiled 以降はどの段階を受け取っても差し替える。
+   * 見せ方の順序:
+   *   1. 玉手箱を開ける      (lifting)  ふたのない絵へ入れ替える
+   *   2. 煙を画面いっぱいに  (rising / filling)
+   *                          背景はふたのない絵のまま、結果も出さない
+   *   3. 背景を煙ありの絵へ  (veiled)   煙に覆われている隙に入れ替える
+   *   4. 結果を煙の下に置く  (veiled)   置くだけで、隠すのは煙に任せる
+   *   5. 煙が晴れる          (settling) 晴れるにつれて結果が見えてくる
+   *
+   * 3と4を veiled だけに任せると、描画が飛んだときに背景も結果も出ないまま
+   * 演出が終わってしまう。veiled 以降はどの段階を受け取っても同じ処理をする。
    */
   function onRevealPhase(phase) {
-    const beforeVeil = phase === 'lifting' || phase === 'rising' || phase === 'filling';
-
-    // ふたが持ち上がる段階で、開いた絵へ入れ替える。
-    // 煙が立ちのぼるより前に切り替わりきるよう、最初の段階で始める
+    // 1. ふたを開ける。煙より先に入れ替わりきるよう、最初の段階で始める
     if (phase === 'lifting') {
       setBackdrop('opened');
-    } else if (phase === 'rising') {
-      setBackdrop('smoke');
-    }
-
-    if (beforeVeil) {
       slotsEl.classList.add('is-veiled');
       return;
     }
 
+    // 2. 煙が広がりきるまでは、背景も中身もそのまま
+    if (phase === 'rising' || phase === 'filling') {
+      slotsEl.classList.add('is-veiled');
+      return;
+    }
+
+    // 3. 覆われている間に、煙ありの絵へ替える(入れ替えは煙の下で終わる)
+    setBackdrop('smoke');
+
+    // 4. 結果を煙の下に置く
     if (pendingDisplay) {
       render(pendingDisplay);
       pendingDisplay = null;
     }
-    // 完全に覆われている間だけ隠し、薄れ始めたら見せる
-    slotsEl.classList.toggle('is-veiled', phase === 'veiled');
+
+    // 5. あとは煙が晴れるのに任せる。区画の側では隠さない
+    slotsEl.classList.remove('is-veiled');
   }
 
   function resizeOcean() {

@@ -22,13 +22,21 @@
  *   lifting  (2.0s) ふたが開いた絵へ入れ替わる。煙はまだ出さない
  *                   (入れ替えは0.8秒で済み、残りは開いた絵を見せる時間)
  *   rising   (1.0s) 口から最初のひと筋が立ちのぼる
- *   filling  (1.4s) 煙が画面いっぱいに広がる
- *   veiled   (0.6s) 完全に覆われている間に写真を入れ替える
- *   settling (1.6s) 写真が見える濃さまで薄れる。ここで止まり、引いていかない
+ *   filling  (1.4s) 煙が画面いっぱいに広がる。終わりぎわに一面を塗りつぶす
+ *   veiled   (1.2s) 完全に覆われている。この隙に背景を煙ありの絵へ替え、
+ *                   結果を煙の下に置く(背景の入れ替えに0.8秒かかるため、
+ *                   その間ずっと覆われたままになる長さにしてある)
+ *   settling (1.6s) 煙が薄れ、下に置いてある結果が見えてくる。
+ *                   ここで止まり、引いていかない
  *   done           演出の終わり。煙はそのまま漂い続ける
  *
- * onPhase(phase, progress) で各段階を呼び出し側へ伝える。写真の差し替えは
- * veiled を受け取って view.html 側で行う。
+ * 見せ方の要は、**煙で埋め尽くしてから背景と結果を入れ替え、煙が晴れる中で
+ * 結果が現れる**こと。結果そのものを淡く出し入れはしない(view.html側でも
+ * 区画に透明度の遷移をかけない)。覆いきれずに入れ替えが見えてしまわないよう、
+ * かたまりの煙に加えて一面を塗りつぶす層(veil)を重ねる。
+ *
+ * onPhase(phase, progress) で各段階を呼び出し側へ伝える。背景の入れ替えと
+ * 写真の差し替えは veiled を受け取って view.html 側で行う。
  * 待機画面へ戻すときは close() を呼ぶと、煙が消えてふたが戻る。
  */
 (function (global) {
@@ -39,9 +47,13 @@
     ['lifting', 2000],
     ['rising', 1000],
     ['filling', 1400],
-    ['veiled', 600],
+    ['veiled', 1200],
     ['settling', 1600]
   ];
+
+  // 画面を覆いきるための一面の色。かたまりの煙と同じ色味にして、
+  // 塗りつぶしていることが分からないようにする。
+  const VEIL_COLOR = '250, 246, 253';
 
   // 写真を出しているあいだ、煙を漂わせておく濃さ。
   // かたまりが重なるため、1つあたりはかなり薄くしないと画面が白く飛ぶ。
@@ -219,28 +231,55 @@
 
     /**
      * 段階ごとの「煙の広がり具合」(0=玉手箱のそば, 1=画面いっぱい)と濃さ、
-     * 口から漏れる光の強さ。
+     * 口から漏れる光の強さ、画面を覆いきる一面の濃さ(veil)。
+     *
+     * veil は、かたまりの煙だけでは隙間が残るため重ねる層。ここが1のあいだに
+     * 背景と結果を入れ替えるので、入れ替えの瞬間が見えることはない。
+     * 薄れ方はかたまりの煙と揃え、煙が晴れるのと同じ速さで結果が現れる。
      */
     function smokeShape(phase, progress) {
       switch (phase) {
         // ふたがゆっくり消える。煙はまだ出さない
         case 'lifting':
-          return { spread: 0, alpha: 0, glow: easeInOut(progress) * 0.7 };
+          return { spread: 0, alpha: 0, glow: easeInOut(progress) * 0.7, veil: 0 };
         // ふたが消えきってから、ひと筋が立ちのぼる
         case 'rising':
-          return { spread: 0.14 * easeOut(progress), alpha: 0.8 * progress, glow: 0.7 + 0.3 * progress };
-        // 画面いっぱいに広がる
+          return { spread: 0.14 * easeOut(progress), alpha: 0.8 * progress, glow: 0.7 + 0.3 * progress, veil: 0 };
+        // 画面いっぱいに広がる。かたまりが行き渡る終わりぎわに一面を塗り足す
         case 'filling':
-          return { spread: 0.14 + 0.86 * easeInOut(progress), alpha: 0.8 + 0.2 * progress, glow: 1 - progress };
-        // 完全に覆う(この間に写真を入れ替える)
+          return {
+            spread: 0.14 + 0.86 * easeInOut(progress),
+            alpha: 0.8 + 0.2 * progress,
+            glow: 1 - progress,
+            veil: easeInOut(clamp01((progress - 0.6) / 0.4))
+          };
+        // 完全に覆う(この間に背景を替え、結果を煙の下に置く)
         case 'veiled':
-          return { spread: 1, alpha: 1, glow: 0 };
-        // 写真が見える濃さまで薄れる。広がりは保ったままにして、煙を引かせない
+          return { spread: 1, alpha: 1, glow: 0, veil: 1 };
+        // 煙が薄れ、下に置いてある結果が見えてくる。
+        // 広がりは保ったままにして、煙を引かせない
         case 'settling':
-          return { spread: 1, alpha: 1 - (1 - SETTLED_ALPHA) * easeInOut(progress), glow: 0 };
+          return {
+            spread: 1,
+            alpha: 1 - (1 - SETTLED_ALPHA) * easeInOut(progress),
+            glow: 0,
+            veil: 1 - easeInOut(progress)
+          };
         default:
-          return { spread: 1, alpha: SETTLED_ALPHA, glow: 0 };
+          return { spread: 1, alpha: SETTLED_ALPHA, glow: 0, veil: 0 };
       }
+    }
+
+    /**
+     * 画面を一面に塗る層。かたまりの煙の上に重ね、隙間を埋める。
+     * @param {number} strength - 0で描かない、1で完全に覆う
+     */
+    function drawVeil(strength) {
+      if (strength <= 0.01) return;
+      ctx.save();
+      ctx.fillStyle = `rgba(${VEIL_COLOR}, ${strength})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
     }
 
     /**
@@ -296,7 +335,7 @@
         return;
       }
 
-      const { spread, alpha, glow } = smokeShape(name, progress);
+      const { spread, alpha, glow, veil } = smokeShape(name, progress);
       const boxX = box.x;
       const boxY = box.y;
 
@@ -325,6 +364,9 @@
         );
       }
 
+      // かたまりの隙間を埋める層。これが覆っているあいだに
+      // view.html が背景を替え、結果を煙の下に置く
+      drawVeil(veil);
     }
 
     function loop(nowMs) {
