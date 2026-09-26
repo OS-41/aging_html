@@ -187,21 +187,39 @@
    * 背景に敷き、その右上に広がる煙の部分へ結果の写真を並べる。
    * 煙そのもの(#ocean)は絵の上に重ねて描くため、他の絵柄と重ね順が逆になる。
    */
+  /*
+   * 玉手箱の背景。ふたの開き具合ごとに絵を用意し、重ねて置いて
+   * 不透明度で入れ替える。canvasで描いたふたを重ねるより、
+   * 絵そのものを差し替えるほうが絵柄を壊さない。
+   * どの絵も同じ寸法・同じ構図であることが前提。
+   */
   #backdrop {
     position: fixed;
     inset: 0;
     z-index: -2;
+    opacity: 0;
+    transition: opacity 0.8s ease;
+  }
+  body.is-tamatebako #backdrop { opacity: 1; }
+  #backdrop .layer {
+    position: absolute;
+    inset: 0;
+    /* 中央合わせ。tamatebako-scene.js が煙の出どころをこの前提で計算する */
     background-position: center;
     background-size: cover;
     background-repeat: no-repeat;
     opacity: 0;
-    transition: opacity 0.8s ease;
+    transition: opacity 1.1s ease;
   }
-  body.is-tamatebako #backdrop {
+  #backdrop .layer.is-on { opacity: 1; }
+  #backdrop .layer[data-layer="closed"] {
+    background-image: url('backgrounds/aging_viewBackground_closed.jpg');
+  }
+  #backdrop .layer[data-layer="smoke"] {
     background-image: url('backgrounds/aging_viewBackground.jpg');
-    /* 中央合わせ。tamatebako-scene.js が煙の出どころをこの前提で計算する */
-    background-position: center;
-    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #backdrop .layer { transition: none; }
   }
   body.is-tamatebako #ocean {
     z-index: 0;
@@ -276,7 +294,12 @@
 </style>
 </head>
 <body>
-  <div id="backdrop"></div>
+  <div id="backdrop">
+    <!-- ふたが閉じた状態。待機中はこれを映す -->
+    <div class="layer" data-layer="closed"></div>
+    <!-- ふたが開いて煙が出た状態。演出のあいだはこれ -->
+    <div class="layer" data-layer="smoke"></div>
+  </div>
   <canvas id="ocean"></canvas>
   <div class="booth">
     <div class="booth-header">
@@ -488,8 +511,9 @@
           playReveal(display);
         } else {
           if (currentTheme === 'tamatebako' && display.mode !== 'results') {
-            // 煙を消してふたを閉じ、待機中の姿に戻す
+            // 煙を消し、ふたを閉じた絵へ戻す
             tamatebakoScene.close();
+            setBackdrop('closed');
           }
           render(display);
         }
@@ -511,12 +535,26 @@
   // 結果を表示している間は薄くして、写真の邪魔をしない。
 
   const ocean = document.getElementById('ocean');
+  const backdropLayers = document.querySelectorAll('#backdrop .layer');
   const oceanScene = createOceanScene(ocean);
   const tamatebakoScene = createTamatebakoScene(ocean, { onPhase: onRevealPhase });
 
   let currentTheme = 'realistic';
   // 煙に覆われている間に差し替える内容を持っておく
   let pendingDisplay = null;
+
+  /**
+   * 背景の絵を切り替える。指定した層だけを表示し、他は消す。
+   * 用意していない層を指定した場合は、いま出ているものを変えない。
+   * @param {string} name - closed | opened | smoke
+   */
+  function setBackdrop(name) {
+    const target = [...backdropLayers].find((layer) => layer.dataset.layer === name);
+    if (!target) return;
+    for (const layer of backdropLayers) {
+      layer.classList.toggle('is-on', layer === target);
+    }
+  }
 
   /**
    * 今の絵柄を描いているモジュール。
@@ -540,7 +578,10 @@
     // 絵柄をまたぐと区画の置き場所が変わるため、演出の途中の状態は畳んでおく
     slotsEl.classList.remove('is-veiled');
 
-    if (theme !== 'tamatebako') {
+    if (theme === 'tamatebako') {
+      // 待機中はふたが閉じた絵から始める
+      setBackdrop('closed');
+    } else {
       oceanScene.setTheme(theme);
     }
     resizeOcean();
@@ -554,7 +595,7 @@
    */
   function playReveal(display) {
     pendingDisplay = display;
-    // ふたが消えて煙が立ちのぼっている間は区画を見せない
+    // ふたが開いて煙が立ちのぼっている間は区画を見せない
     slotsEl.classList.add('is-veiled');
     tamatebakoScene.play();
   }
@@ -567,6 +608,14 @@
    */
   function onRevealPhase(phase) {
     const beforeVeil = phase === 'lifting' || phase === 'rising' || phase === 'filling';
+
+    // ふたが持ち上がる段階で、開いた絵へ入れ替える。
+    // 煙が立ちのぼるより前に切り替わりきるよう、最初の段階で始める
+    if (phase === 'lifting') {
+      setBackdrop('opened');
+    } else if (phase === 'rising') {
+      setBackdrop('smoke');
+    }
 
     if (beforeVeil) {
       slotsEl.classList.add('is-veiled');
