@@ -117,10 +117,26 @@
     touch-action: none;
   }
   .panel-shell > .drag:active { cursor: grabbing; }
+  /* つまみの上では文字列を選ばせない。押した瞬間に選択が始まると、
+     ブラウザがそちらを優先して移動が始まらないため */
+  .panel-shell > .drag,
+  .panel-resize {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
   .panel-shell.is-dragging {
     opacity: 0.5;
     outline: 2px dashed var(--accent);
     outline-offset: 2px;
+  }
+  /* 押せたことがその場で分かるようにする。動かす前でも色が変わるので、
+     「掴めていないのか、動かせないのか」を係員が切り分けられる */
+  .panel-shell.is-grabbed > .drag,
+  .panel-shell.is-grabbed .panel-resize::before {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
   }
 
   /* ---- 欄の高さ ---- */
@@ -521,8 +537,8 @@
       </p>
     </div>
       </details>
-      <button type="button" class="drag" aria-label="表示の制御の欄を移動">⠿ 移動</button>
-      <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
+      <button type="button" class="drag" draggable="false" aria-label="表示の制御の欄を移動">⠿ 移動</button>
+      <div class="panel-resize" draggable="false" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
     </div>
 
     <div class="panel-shell" data-panel="clients">
@@ -540,10 +556,11 @@
       </div>
       <p class="empty" id="clientEmpty">接続中の画面はありません</p>
       <p class="now-showing" id="apiStatus">aging API: —</p>
+      <p class="now-showing" id="serverStatus">サーバー: —</p>
     </div>
       </details>
-      <button type="button" class="drag" aria-label="通信状況の欄を移動">⠿ 移動</button>
-      <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
+      <button type="button" class="drag" draggable="false" aria-label="通信状況の欄を移動">⠿ 移動</button>
+      <div class="panel-resize" draggable="false" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
     </div>
 
     <div class="panel-shell" data-panel="storage">
@@ -567,8 +584,8 @@
       <p class="empty" id="entryEmpty">保管中の写真はありません</p>
     </div>
       </details>
-      <button type="button" class="drag" aria-label="保管中の写真の欄を移動">⠿ 移動</button>
-      <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
+      <button type="button" class="drag" draggable="false" aria-label="保管中の写真の欄を移動">⠿ 移動</button>
+      <div class="panel-resize" draggable="false" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
     </div>
 
     <div class="panel-shell" data-panel="logs">
@@ -592,8 +609,8 @@
       <p class="empty" id="logEmpty">履歴はまだありません</p>
     </div>
       </details>
-      <button type="button" class="drag" aria-label="処理履歴の欄を移動">⠿ 移動</button>
-      <div class="panel-resize" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
+      <button type="button" class="drag" draggable="false" aria-label="処理履歴の欄を移動">⠿ 移動</button>
+      <div class="panel-resize" draggable="false" title="ドラッグで高さを変える（2回押すと中身に合わせる）"></div>
     </div>
 
     </div>
@@ -626,6 +643,7 @@
   const clientRows = document.getElementById('clientRows');
   const clientEmpty = document.getElementById('clientEmpty');
   const apiStatus = document.getElementById('apiStatus');
+  const serverStatus = document.getElementById('serverStatus');
   const logEmpty = document.getElementById('logEmpty');
 
   const REFRESH_MS = 3000;
@@ -927,6 +945,14 @@
       return tr;
     });
     clientRows.replaceChildren(...rows);
+
+    // いま動いているコードの版と、起動してからの時間。
+    // 「直したはずの動きにならない」ときに、古いビルドを見ていないかを
+    // ここで確かめられる
+    const uptimeMin = Math.floor(status.server.uptime_ms / 60000);
+    serverStatus.textContent = `サーバー: ${timeText(status.server.started_at)} 起動`
+      + `（${uptimeMin < 60 ? `${uptimeMin}分` : `${Math.floor(uptimeMin / 60)}時間${uptimeMin % 60}分`}）`
+      + ` ／ 版 ${status.server.commit || '不明（ローカル実行）'}`;
 
     const api = status.aging_api;
     if (!api.last_at) {
@@ -1294,7 +1320,7 @@
     const { shell, mark, target, active } = drag;
     drag = null;
 
-    shell.classList.remove('is-dragging');
+    shell.classList.remove('is-dragging', 'is-grabbed');
     document.body.classList.remove('is-reordering');
     if (mark) mark.remove();
     if (!active || !commit || !target) return;
@@ -1337,11 +1363,10 @@
 
   // ---- 高さの変更 ----
 
-  function beginResize(shell, event) {
+  function beginResize(shell, y) {
     resize = {
       shell,
-      pointerId: event.pointerId,
-      startY: event.clientY,
+      startY: y,
       startHeight: shell.getBoundingClientRect().height,
       height: 0
     };
@@ -1360,7 +1385,7 @@
     if (!resize) return;
     const { shell, height } = resize;
     resize = null;
-    shell.classList.remove('is-resizing');
+    shell.classList.remove('is-resizing', 'is-grabbed');
     document.body.classList.remove('is-resizing-panel');
     if (!commit || !height) return;
     layout.heights[shell.dataset.panel] = height;
@@ -1377,24 +1402,79 @@
   }
 
   // ---- 各欄への割り当て ----
+  //
+  // Pointer Events と マウスイベントの両方から同じ流れに入れるようにする。
+  // Safari(macOS)では pointerdown で preventDefault しても続く mousedown が
+  // 止まらず、文字列の選択やブラウザ自身のドラッグが始まってしまい、
+  // そちらに持っていかれた時点で pointercancel が飛んで動かせなくなる。
+  // mousedown 側でも preventDefault し、どちらの経路でも動くようにする。
+
+  function startMove(shell, x, y) {
+    if (drag || resize) return;
+    drag = { shell, startX: x, startY: y, active: false, target: null, mark: null };
+    shell.classList.add('is-grabbed');
+  }
+
+  function startSizing(shell, y) {
+    if (drag || resize) return;
+    beginResize(shell, y);
+    shell.classList.add('is-grabbed');
+  }
+
+  /**
+   * 動かしている最中。つまみの外に出ていても呼ばれる。
+   */
+  function moveTo(x, y) {
+    if (drag) {
+      if (!drag.active) {
+        // 少し動かしてから移動を始める(押しただけで並びが変わらないように)
+        if (Math.hypot(x - drag.startX, y - drag.startY) < DRAG_THRESHOLD_PX) return false;
+        beginDrag();
+      }
+      const target = dropTargetAt(x, y, drag.shell);
+      if (target) {
+        drag.target = target;
+        showDropMark(target);
+      }
+      return true;
+    }
+    if (resize) {
+      updateResize(y);
+      return true;
+    }
+    return false;
+  }
+
+  function finish(commit) {
+    const had = Boolean(drag || resize);
+    endDrag(commit);
+    endResize(commit);
+    return had;
+  }
 
   for (const shell of allShells) {
     const handle = shell.querySelector('.drag');
     const grip = shell.querySelector('.panel-resize');
 
-    handle.addEventListener('pointerdown', (event) => {
-      if (event.button !== undefined && event.button !== 0) return;
-      event.preventDefault();
-      drag = {
-        shell,
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        active: false,
-        target: null,
-        mark: null
-      };
-    });
+    for (const element of [handle, grip]) {
+      element.addEventListener('pointerdown', (event) => {
+        if (event.button !== undefined && event.button !== 0) return;
+        event.preventDefault();
+        if (element === handle) startMove(shell, event.clientX, event.clientY);
+        else startSizing(shell, event.clientY);
+      });
+
+      // 文字列の選択やブラウザ自身のドラッグに持っていかれないようにする。
+      // Pointer Events が届かない場合は、こちらが始まりになる。
+      element.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        if (element === handle) startMove(shell, event.clientX, event.clientY);
+        else startSizing(shell, event.clientY);
+      });
+
+      element.addEventListener('dragstart', (event) => event.preventDefault());
+    }
 
     handle.addEventListener('keydown', (event) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
@@ -1402,11 +1482,6 @@
       movePanelByKey(shell, event.key);
     });
 
-    grip.addEventListener('pointerdown', (event) => {
-      if (event.button !== undefined && event.button !== 0) return;
-      event.preventDefault();
-      beginResize(shell, event);
-    });
     // 2回押すと、決めた高さを捨てて中身に合わせる
     grip.addEventListener('dblclick', () => clearPanelHeight(shell));
 
@@ -1414,37 +1489,34 @@
     detailsOf(shell).addEventListener('toggle', () => applyPanelHeight(shell));
   }
 
-  // 動かしている間はwindowで受ける。つまみの外へ出ても届かせるため
-  window.addEventListener('pointermove', (event) => {
-    if (drag && event.pointerId === drag.pointerId) {
-      if (!drag.active) {
-        // 少し動かしてから移動を始める(押しただけで並びが変わらないように)
-        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
-        beginDrag();
-      }
-      event.preventDefault();
-      const target = dropTargetAt(event.clientX, event.clientY, drag.shell);
-      if (target) {
-        drag.target = target;
-        showDropMark(target);
-      }
-      return;
-    }
-    if (resize && event.pointerId === resize.pointerId) {
-      event.preventDefault();
-      updateResize(event.clientY);
-    }
+  // 動かしている間はwindowで受ける。つまみの外へ出ても届かせるため。
+  // 同じ動きが pointermove と mousemove の両方で来ることがあるが、
+  // どちらも同じ計算をするだけなので重ねて呼ばれても問題ない。
+  for (const type of ['pointermove', 'mousemove']) {
+    window.addEventListener(type, (event) => {
+      if (moveTo(event.clientX, event.clientY)) event.preventDefault();
+    });
+  }
+
+  for (const type of ['pointerup', 'mouseup']) {
+    window.addEventListener(type, () => finish(true));
+  }
+
+  // 指での操作が打ち切られたときだけ取りやめる。
+  // マウスの pointercancel は、上のとおり別経路で続けられるので無視する。
+  window.addEventListener('pointercancel', (event) => {
+    if (event.pointerType === 'touch') finish(false);
   });
 
-  window.addEventListener('pointerup', (event) => {
-    if (drag && event.pointerId === drag.pointerId) endDrag(true);
-    if (resize && event.pointerId === resize.pointerId) endResize(true);
-  });
+  // 画面から離れたまま掴みっぱなしにならないように
+  window.addEventListener('blur', () => finish(false));
 
-  window.addEventListener('pointercancel', () => {
-    endDrag(false);
-    endResize(false);
-  });
+  // 動かしている間は、文字列の選択やブラウザ自身のドラッグを始めさせない
+  for (const type of ['selectstart', 'dragstart']) {
+    window.addEventListener(type, (event) => {
+      if (drag || resize) event.preventDefault();
+    });
+  }
 
   columnSelect.addEventListener('change', () => {
     layout.columns = Math.min(MAX_COLUMNS, Math.max(1, Number(columnSelect.value) || 1));
