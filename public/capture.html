@@ -101,6 +101,24 @@
     color: var(--muted);
     margin: 0;
   }
+  /*
+   * 個人情報の扱いの掲示。撮る前に目に入る位置に、立ったまま読み切れる
+   * 長さで置く。押す操作の邪魔をしないよう、文字は小さめにする。
+   */
+  .privacy {
+    width: 100%;
+    max-width: 780px;
+    margin: 8px auto 0;
+    padding: 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--muted);
+    font-size: clamp(12px, 1.3vw, 15px);
+    line-height: 1.6;
+    text-align: center;
+  }
+  .privacy b { color: var(--ink); font-weight: 600; }
+
   /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
   .dev-bar {
     margin-top: 0;
@@ -133,6 +151,11 @@
     <div class="booth-header">
       <h1>未来のあなたを撮影します</h1>
       <p class="subtitle">撮影した写真は、この先の会場でご覧いただけます</p>
+      <p class="privacy">
+        撮影した写真は、加工のため<b>外部のサービスへ送信</b>します。
+        元の写真は加工が終わりしだい削除し、加工後の写真も<b>最大30分</b>で消去します。
+        写真を他の目的に使うことはありません。
+      </p>
     </div>
 
     <p class="status" id="status">「カメラを開始」を押してください</p>
@@ -1053,6 +1076,7 @@
     return resultBlob;
   }
 
+  lockKiosk();
   startHeartbeat('capture');
   cameraId = loadCameraId();
   refreshCameraList();

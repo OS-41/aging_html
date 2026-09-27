@@ -23,6 +23,47 @@ html, body {
   margin: 0;
 }
 
+/*
+ * 展示機(撮影ブース・閲覧ブース)のキオスク化。
+ *
+ * 来場者が画面に触れても、拡大したり、ずれたり、別のものが出たりしない
+ * ようにする。係員画面(/staff.html)には付けない(文字を選べ、送れる必要が
+ * あるため)。端末側の全画面表示・スリープ無効とあわせて使う。
+ *
+ * ピンチでの拡大は、iOSのSafariが user-scalable=no を無視するため
+ * CSSだけでは止まらない。common.js の lockKiosk() が併せて押さえる。
+ */
+body.is-kiosk {
+  /* 画面はこの1枚きり。引っぱっても動かさない */
+  overflow: hidden;
+  /* ダブルタップでの拡大を止める(押す操作はそのまま通る) */
+  touch-action: manipulation;
+  /* 長押しのメニューと、文字の選択を出さない */
+  -webkit-touch-callout: none;
+}
+/*
+ * 画面ちょうどに収める。はみ出した分は押せなくなるため。
+ * 余白と文字を詰めて、余った高さはカメラ映像(.stage)に回す。
+ */
+body.is-kiosk .booth {
+  height: 100%;
+  gap: 12px;
+  padding-block: 16px;
+}
+body.is-kiosk .staff-bar {
+  padding-top: 10px;
+  gap: 6px 14px;
+  font-size: 13px;
+}
+body.is-kiosk .staff-bar select { font-size: 13px; padding: 5px 9px; }
+body.is-kiosk img,
+body.is-kiosk canvas,
+body.is-kiosk video {
+  /* 写真を引っぱって持ち出せないようにする */
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
 body {
   background: var(--bg);
   color: var(--ink);
@@ -85,18 +126,25 @@ h1 {
 .status.is-done { color: var(--ok); }
 
 /* カメラ映像・撮影写真・結果を表示する共通の枠 */
+/*
+ * 高さは「残り全部」。見出しや掲示やボタンを置いたあとに残った分を
+ * 映像に回す。固定の高さ(以前は 58vh)にすると、画面の縦が短い端末で
+ * ボタンが画面の外に出てしまい、キオスク化でスクロールも止めているため
+ * 押せなくなる。
+ */
 .stage {
   width: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 240px;
 }
 .stage video,
 .stage canvas {
   width: 100%;
   max-width: 100%;
-  max-height: 58vh;
+  max-height: 100%;
   border-radius: 14px;
   background: #000;
   object-fit: contain;
