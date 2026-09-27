@@ -344,6 +344,14 @@ function recordAgingApiCall(status, errorMessage = null) {
 const SERVER_STARTED_AT_MS = Date.now();
 
 /*
+ * いま動いているコードの版。
+ * 「直したはずの動きにならない」のが、古いビルドを見ているせいなのかを
+ * 係員画面だけで確かめられるようにするため。Renderがデプロイ時に渡す
+ * コミットIDを使い、無ければ不明として扱う。
+ */
+const SERVER_COMMIT = (process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || '').slice(0, 7) || null;
+
+/*
  * ---- 処理履歴の詳細 ----
  *
  * 一覧の「内容」は一行で読める長さに保ち、原因を追うための材料は
@@ -1254,6 +1262,7 @@ router.get('/api/status', requireBasicAuth, (req, res) => {
   res.json({
     server: {
       now: new Date(now).toISOString(),
+      commit: SERVER_COMMIT,
       started_at: new Date(SERVER_STARTED_AT_MS).toISOString(),
       uptime_ms: now - SERVER_STARTED_AT_MS,
       entries: entryStore.size,
