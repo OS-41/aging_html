@@ -1422,6 +1422,63 @@
   }
 
   /**
+   * いまの指の位置から、吸い付く先を取り直す。
+   */
+  function refreshDropTarget(x, y) {
+    if (!drag || !drag.active) return;
+    const target = dropTargetAt(x, y, drag.shell);
+    if (target) {
+      drag.target = target;
+      showDropMark(target);
+    }
+  }
+
+  /*
+   * 画面の端まで運んだときは、そのまま画面を送る。
+   * iPadのように欄の全体が画面に収まらない端末では、指を画面の外へは
+   * 出せないので、これが無いと画面の外にある位置へは運べない。
+   */
+  const EDGE_SCROLL_ZONE_PX = 80;
+  const EDGE_SCROLL_MAX_PX = 20;
+  let edgeScroll = { frame: 0, speed: 0, x: 0, y: 0 };
+
+  function stopEdgeScroll() {
+    if (edgeScroll.frame) cancelAnimationFrame(edgeScroll.frame);
+    edgeScroll = { frame: 0, speed: 0, x: 0, y: 0 };
+  }
+
+  function updateEdgeScroll(x, y) {
+    if (!drag || !drag.active) {
+      stopEdgeScroll();
+      return;
+    }
+
+    // 端に近いほど速く送る
+    const fromTop = y - EDGE_SCROLL_ZONE_PX;
+    const fromBottom = (window.innerHeight - EDGE_SCROLL_ZONE_PX) - y;
+    let speed = 0;
+    if (fromTop < 0) speed = -Math.min(1, -fromTop / EDGE_SCROLL_ZONE_PX) * EDGE_SCROLL_MAX_PX;
+    else if (fromBottom < 0) speed = Math.min(1, -fromBottom / EDGE_SCROLL_ZONE_PX) * EDGE_SCROLL_MAX_PX;
+
+    edgeScroll.speed = speed;
+    edgeScroll.x = x;
+    edgeScroll.y = y;
+    if (!speed || edgeScroll.frame) return;
+
+    const step = () => {
+      if (!drag || !drag.active || !edgeScroll.speed) {
+        edgeScroll.frame = 0;
+        return;
+      }
+      window.scrollBy(0, edgeScroll.speed);
+      // 画面が動いたぶん、吸い付く先も取り直す
+      refreshDropTarget(edgeScroll.x, edgeScroll.y);
+      edgeScroll.frame = requestAnimationFrame(step);
+    };
+    edgeScroll.frame = requestAnimationFrame(step);
+  }
+
+  /**
    * 動かしている最中。つまみの外に出ていても呼ばれる。
    */
   function moveTo(x, y) {
@@ -1431,14 +1488,13 @@
         if (Math.hypot(x - drag.startX, y - drag.startY) < DRAG_THRESHOLD_PX) return false;
         beginDrag();
       }
-      const target = dropTargetAt(x, y, drag.shell);
-      if (target) {
-        drag.target = target;
-        showDropMark(target);
-      }
+      refreshDropTarget(x, y);
+      updateEdgeScroll(x, y);
       return true;
     }
     if (resize) {
+      // 高さの変更では画面を送らない。送ると基準がずれて、
+      // 指を止めていても伸び続けてしまうため
       updateResize(y);
       return true;
     }
@@ -1447,6 +1503,7 @@
 
   function finish(commit) {
     const had = Boolean(drag || resize);
+    stopEdgeScroll();
     endDrag(commit);
     endResize(commit);
     return had;
