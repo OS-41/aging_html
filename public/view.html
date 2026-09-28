@@ -264,9 +264,12 @@
     /* 背景の絵で煙が広がっている範囲。ここに写真を置く。
        寄ったときに左の見出しへかぶらないよう、左端に余裕をとってある */
     position: absolute;
+    /* 左右は同じ値で対に指定する。幅で決めると、指定の取り方によって
+       左右の余白がずれるため */
     left: 2%;
+    right: 2%;
     top: 9%;
-    width: 96%;
+    width: auto;
     height: 84%;
     flex: none;
     gap: 14px;
@@ -706,6 +709,7 @@
   resizeOcean();
   activeScene().start();
 
+  lockKiosk();
   startHeartbeat('view');
   poll();
   setInterval(poll, POLL_MS);

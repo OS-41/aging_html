@@ -173,6 +173,49 @@ async function callApi(apiPath, options = {}) {
 }
 
 /**
+ * 展示機の画面を固定する(キオスク化)。撮影ブースと閲覧ブースで呼ぶ。
+ *
+ * 来場者が画面に触れても、拡大・移動・選択メニューが起きないようにする。
+ * CSS側(booth.css の body.is-kiosk)と対になっていて、こちらは
+ * CSSでは止められないものを受け持つ。
+ *
+ * - ピンチでの拡大: iOSのSafariは viewport の user-scalable=no を無視する
+ * - 長押しのメニュー
+ * - 2本指でのスクロール
+ * - 同じ場所をすばやく2回叩いたときの拡大(touch-action の保険)
+ *
+ * 係員画面では呼ばない(文字を選べ、拡大できる必要があるため)。
+ */
+function lockKiosk() {
+  document.body.classList.add('is-kiosk');
+
+  for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+    document.addEventListener(type, (event) => event.preventDefault(), { passive: false });
+  }
+
+  document.addEventListener('contextmenu', (event) => event.preventDefault());
+
+  document.addEventListener('touchmove', (event) => {
+    if (event.touches.length > 1) event.preventDefault();
+  }, { passive: false });
+
+  // 同じ場所を続けて叩いたときだけ抑える。場所が違えば普通の操作として通す
+  const DOUBLE_TAP_MS = 350;
+  const DOUBLE_TAP_PX = 30;
+  let lastTap = { at: 0, x: 0, y: 0 };
+  document.addEventListener('touchend', (event) => {
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const now = Date.now();
+    const near = Math.hypot(touch.clientX - lastTap.x, touch.clientY - lastTap.y) < DOUBLE_TAP_PX;
+    if (now - lastTap.at < DOUBLE_TAP_MS && near) {
+      event.preventDefault();
+    }
+    lastTap = { at: now, x: touch.clientX, y: touch.clientY };
+  }, { passive: false });
+}
+
+/**
  * 係員画面で通信状況を見られるよう、このページの生存を定期的に伝える。
  * 送信にかかった往復時間と、これまでの通信エラー件数も一緒に送る。
  * @param {string} role - 'capture' | 'view' | 'staff'
