@@ -147,11 +147,27 @@
     min-height: 0;
   }
   .panel[open] > .panel-body { min-height: 0; }
-  .panel-shell.is-sized > .panel { flex: 1; min-height: 0; }
-  .panel-shell.is-sized .panel-body {
+  /*
+   * 高さを決めた欄は、その高さのまま。入りきらない分は欄の中を送って見る
+   * (中身に合わせて欄が伸び縮みすることはない)。
+   *
+   * 送るのは <details> 自身にさせる。<details> の中身はブラウザが
+   * ::details-content という箱で包むので、.panel-body に flex を指定しても
+   * その箱には効かず、中身が欄からはみ出してしまうため。
+   * 見出しは送っても残るように貼り付ける。
+   */
+  .panel-shell.is-sized > .panel {
     flex: 1;
+    min-height: 0;
     overflow: auto;
   }
+  .panel-shell.is-sized > .panel > summary {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface);
+  }
+  /* 欄の側で送るので、表ごとの高さの上限は外す */
   .panel-shell.is-sized .table-scroll { max-height: none; }
   .panel-resize {
     height: 14px;
@@ -218,6 +234,33 @@
     background: rgba(0, 0, 0, 0.18);
     border-color: transparent;
     color: var(--accent-ink);
+  }
+  /*
+   * サーバーの再起動を知らせる通知。
+   * 再起動をまたぐと保管中の受付も結果画像も消え、受付番号も1番に戻るため、
+   * 新しい写真の通知より強い色で出し、押して消すまで残す。
+   */
+  .notice-alert {
+    background: var(--danger);
+    color: #ffffff;
+    align-items: flex-start;
+  }
+  .notice-alert button {
+    background: rgba(0, 0, 0, 0.22);
+    color: #ffffff;
+    flex: none;
+    white-space: nowrap;
+  }
+  .notice-alert .notice-body {
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.65;
+  }
+  .notice-alert .notice-body b { font-weight: 700; }
+  .notice-alert .notice-title {
+    display: block;
+    font-size: 19px;
+    font-weight: 700;
   }
 
   .panel {
@@ -459,6 +502,20 @@
 </head>
 <body>
   <div class="booth">
+    <!--
+      サーバーが再起動したときだけ出る。保管していたものが全部消えているので、
+      新しい写真の通知より強く、押して消すまで残す。
+    -->
+    <div class="notice notice-alert" id="restartNotice" hidden>
+      <span class="notice-body">
+        <span class="notice-title" id="restartTitle">サーバーが再起動しました</span>
+        保管していた受付と結果画像は消えています。移動中だった方の写真は出てきません。
+        <b>受付番号も1番からやり直し</b>になるため、再起動より前の番号は当てになりません。
+        閲覧ブースで出てこない方は、撮影ブースへ案内し直してください。
+      </span>
+      <button type="button" id="restartDismiss">確認</button>
+    </div>
+
     <div class="notice" id="notice" hidden>
       <span id="noticeText">新しい写真が届きました</span>
       <button type="button" id="noticeDismiss">確認</button>
@@ -618,6 +675,9 @@
 
 <script src="common.js"></script>
 <script>
+  const restartNotice = document.getElementById('restartNotice');
+  const restartTitle = document.getElementById('restartTitle');
+  const restartDismiss = document.getElementById('restartDismiss');
   const notice = document.getElementById('notice');
   const noticeText = document.getElementById('noticeText');
   const noticeDismiss = document.getElementById('noticeDismiss');
@@ -658,6 +718,9 @@
   let firstLoad = true;
   let pendingNotice = 0;
 
+  // 最初に見たサーバーの起動時刻。これが変わったら再起動したということ
+  let knownServerStart = null;
+
   const timeText = (iso) => new Date(iso).toLocaleTimeString('ja-JP', { hour12: false });
 
   function statusTag(entry) {
@@ -676,6 +739,45 @@
   noticeDismiss.addEventListener('click', () => {
     pendingNotice = 0;
     notice.hidden = true;
+  });
+
+  /**
+   * サーバーが再起動していないか見張る。
+   *
+   * 受付も結果画像もメモリとディスク上の一時領域にあるため、再起動をまたぐと
+   * 全部消える。無料プランのスリープ復帰でも、デプロイでも同じことが起きる。
+   * 黙って消えると「番号が呼ばれない」としか見えないので、係員に知らせる。
+   *
+   * 受付番号(entrySequence)も1番に戻るため、通知の判定に使っている
+   * lastSeenSequence もここで戻す(戻さないと、番号が前回の最大に追いつくまで
+   * 新しい写真の通知が出なくなる)。
+   *
+   * @param {object} server - /api/status の server
+   */
+  function watchRestart(server) {
+    if (!server?.started_at) return;
+    if (!knownServerStart) {
+      knownServerStart = server.started_at;
+      return;
+    }
+    if (server.started_at === knownServerStart) return;
+
+    knownServerStart = server.started_at;
+    lastSeenSequence = 0;
+    pendingNotice = 0;
+    notice.hidden = true;
+
+    restartTitle.textContent = `サーバーが再起動しました（${timeText(server.started_at)}）`;
+    restartNotice.hidden = false;
+    logEvent({
+      level: 'error',
+      event: 'server:restarted',
+      message: `再起動を検知（起動 ${server.started_at}）。保管していた受付と結果は消えています`
+    });
+  }
+
+  restartDismiss.addEventListener('click', () => {
+    restartNotice.hidden = true;
   });
 
   /**
@@ -909,6 +1011,9 @@
    * 各ブースとの通信状況と、aging APIとの通信結果を描画する。
    */
   function renderStatus(status) {
+    // 再起動していれば、保管していたものが消えているので真っ先に知らせる
+    watchRestart(status.server);
+
     clientEmpty.hidden = status.clients.length > 0;
 
     const rows = status.clients.map((client) => {

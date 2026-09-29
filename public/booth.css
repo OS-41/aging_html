@@ -56,6 +56,59 @@ body.is-kiosk .staff-bar {
   font-size: 13px;
 }
 body.is-kiosk .staff-bar select { font-size: 13px; padding: 5px 9px; }
+
+/*
+ * 縦の短い画面(iPadの横向きなど)では、見出し・掲示・ボタンをひと回り
+ * 小さくして、空いた分をカメラ映像に回す。
+ * 主役は映像なので、周りは読めるぎりぎりまで詰める。
+ */
+@media (max-height: 900px) {
+  body.is-kiosk .booth {
+    gap: 8px;
+    padding-block: 12px;
+  }
+  body.is-kiosk h1 { font-size: clamp(18px, 2.2vw, 25px); line-height: 1.25; }
+  body.is-kiosk .subtitle { font-size: clamp(12px, 1.4vw, 14px); margin-top: 3px; }
+  body.is-kiosk .status {
+    min-height: 0;
+    font-size: clamp(15px, 1.9vw, 19px);
+    padding: 7px 16px;
+    border-radius: 10px;
+  }
+  body.is-kiosk .actions { gap: 12px; }
+  body.is-kiosk button {
+    min-height: 46px;
+    min-width: 150px;
+    padding: 8px 20px;
+    font-size: clamp(15px, 1.8vw, 18px);
+  }
+  /* 控えめなボタンは本来の幅のまま(上の min-width を打ち消す)。
+     ここを広げると係員向けの行が折り返し、そのぶん映像が縮む */
+  body.is-kiosk button.quiet {
+    min-height: 34px;
+    min-width: 0;
+    font-size: 13px;
+    padding: 5px 12px;
+  }
+  body.is-kiosk .staff-bar { font-size: 12px; padding-top: 8px; gap: 4px 12px; }
+  /* 係員向けの行は1行に収める。折り返すとそのぶん映像が縮むため */
+  body.is-kiosk .staff-bar select {
+    font-size: 12px;
+    padding: 3px 7px;
+    max-width: 120px;
+  }
+}
+/*
+ * 開発モードのときだけ、画面を送れるようにする。
+ * 開発モードの操作欄は画面の高さに入りきらないことがあり、送れないと
+ * 見切れたまま届かなくなる。使うのは係員だけなので、ここだけ固定を外す。
+ */
+body.is-kiosk.is-dev {
+  overflow: auto;
+  touch-action: pan-y;
+}
+body.is-kiosk.is-dev .booth { height: auto; min-height: 100%; }
+
 body.is-kiosk img,
 body.is-kiosk canvas,
 body.is-kiosk video {

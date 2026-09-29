@@ -118,6 +118,24 @@
     text-align: center;
   }
   .privacy b { color: var(--ink); font-weight: 600; }
+  /* 縦の短い画面では掲示も詰める(読める大きさは保つ) */
+  @media (max-height: 900px) {
+    .privacy {
+      margin-top: 5px;
+      padding: 4px 12px;
+      font-size: 11.5px;
+      line-height: 1.5;
+      max-width: 900px;
+    }
+    /* 係員向けの行を1行に収める。折り返すとそのぶん映像が縮むため、
+       長くなりがちな背景合成の状態だけ幅を決めて末尾を畳む */
+    body.is-kiosk #segmentState {
+      max-width: 230px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+  }
 
   /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
   .dev-bar {
@@ -894,6 +912,9 @@
     if (on === devMode) return;
     devMode = on;
     devBar.hidden = !on;
+    // 開発モードの欄は画面の高さに入りきらないことがある。
+    // 係員しか使わないので、このときだけ画面を送れるようにする
+    document.body.classList.toggle('is-dev', on);
     logEvent({
       level: on ? 'warn' : 'info',
       event: 'dev:mode',
