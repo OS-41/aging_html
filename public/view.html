@@ -74,6 +74,11 @@
     outline: 3px dashed rgba(255, 196, 0, 0.9);
     outline-offset: -3px;
   }
+  /* 開発モードで、加工できずに元の写真を出しているもの */
+  .slot.is-fallback {
+    outline: 3px dashed rgba(226, 104, 92, 0.95);
+    outline-offset: -3px;
+  }
 
   /* 開発モードである旨。会場で出したままにしないための目印 */
   .dev-banner {
@@ -455,6 +460,8 @@
     slot.className = 'slot';
     // 開発モードで埋めた見本。番号も写真も本物ではない
     if (entry.placeholder) slot.classList.add('is-placeholder');
+    // 開発モードで、加工できずに元の写真をそのまま出しているもの
+    if (entry.fallback) slot.classList.add('is-fallback');
 
     const header = document.createElement('div');
     header.className = 'slot-number';
@@ -463,7 +470,9 @@
     num.textContent = String(entry.sequence);
     const label = document.createElement('span');
     label.className = 'label';
-    label.textContent = entry.placeholder ? '番（見本）' : '番の方';
+    if (entry.placeholder) label.textContent = '番（見本）';
+    else if (entry.fallback) label.textContent = '番（未加工）';
+    else label.textContent = '番の方';
     header.append(num, label);
 
     const photos = document.createElement('div');
@@ -474,20 +483,23 @@
       const photo = document.createElement('div');
       photo.className = 'photo';
 
+      // 加工できなかったものは年齢を持たない。その旨を出す
+      const ageText = output.res_age === null ? '加工前の写真' : `${output.res_age}歳`;
+
       const img = document.createElement('img');
       img.src = resolveImageUrl(output.url);
-      img.alt = `${output.res_age}歳`;
+      img.alt = ageText;
       img.addEventListener('load', () => {
         if (!img.naturalWidth || !img.naturalHeight) return;
         adoptPhotoAspect(img.naturalWidth / img.naturalHeight);
       });
       img.addEventListener('error', () => {
-        logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${output.res_age}歳の画像を表示できません` });
+        logEvent({ level: 'error', event: 'image:load', sequence: entry.sequence, message: `${ageText}を表示できません` });
       });
 
       const age = document.createElement('div');
       age.className = 'age';
-      age.textContent = `${output.res_age}歳`;
+      age.textContent = ageText;
 
       photo.append(img, age);
       photos.append(photo);
@@ -504,6 +516,8 @@
    */
   function pickOutput(entry) {
     if (entry.outputs.length === 0) return null;
+    // 年齢を持たないもの(加工前の写真)は1枚しかないので、そのまま使う
+    if (entry.outputs.length === 1) return entry.outputs[0];
     return entry.outputs.reduce((best, output) =>
       Math.abs(output.res_age - DISPLAY_AGE) < Math.abs(best.res_age - DISPLAY_AGE) ? output : best
     );

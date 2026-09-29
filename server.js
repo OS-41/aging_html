@@ -721,6 +721,8 @@ function toPublicEntry(entry) {
     status: entry.status,
     error: entry.error,
     error_code: entry.errorCode,
+    // 加工できず、元の写真をそのまま出しているもの(開発モードのみ)
+    fallback: entry.fallback === true,
     files,
     captured_at: new Date(entry.capturedAtMs).toISOString(),
     viewed_at: entry.viewedAtMs ? new Date(entry.viewedAtMs).toISOString() : null,
@@ -1038,6 +1040,11 @@ async function processEntry(entry, origin) {
     entry.status = 'error';
     entry.error = err.message;
     entry.errorCode = err.code || null;
+
+    // 開発モードのときは、加工できなかった写真を「元のまま」出せるようにする。
+    // APIのユニットが無い状態でも、撮影から閲覧までを実際の写真で通せる。
+    const shown = devMode ? await keepOriginalAsResult(entry) : false;
+
     if (entry.sourceFileId) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
@@ -1048,9 +1055,52 @@ async function processEntry(entry, origin) {
       sequence: entry.sequence,
       // 一覧には原因の頭だけ(describeAgingErrorの summary にあたる部分)。
       // コードやAPIの原文、例外の全文は詳細で見る
-      message: (err.message || '生成に失敗').split(' / ')[0],
+      message: (err.message || '生成に失敗').split(' / ')[0]
+        + (shown ? '(開発モード: 元の写真を表示します)' : ''),
       detail: { error: err.stack || String(err) }
     });
+  }
+}
+
+/**
+ * 加工できなかった受付を、元の写真のまま閲覧ブースに出せるようにする。
+ *
+ * **開発モードのときだけ呼ぶ。** 本番でこれをやると、加工されていない写真が
+ * 「未来のあなた」として出てしまう。
+ *
+ * 元の写真は uploads 側の保持期間で消えるため、results 側へ複製して
+ * 受付と寿命を揃える(受付を削除すれば一緒に消える)。
+ *
+ * @param {object} entry
+ * @returns {Promise<boolean>} 出せるようにできたか
+ */
+async function keepOriginalAsResult(entry) {
+  const source = entry.sourceFileId && fileStore.get(entry.sourceFileId);
+  if (!source) return false;
+
+  try {
+    const filePath = path.join(RESULTS_DIR, `${entry.id}-original.jpg`);
+    await fs.promises.copyFile(source.filePath, filePath);
+    // 年齢は無い。閲覧ブースと係員画面はこれを見て「元の写真」と分かる
+    entry.outputs = [{ resAge: null, filePath }];
+    entry.fallback = true;
+    entry.status = 'ready';
+    addLog({
+      level: 'warn',
+      event: 'entry:fallback',
+      sequence: entry.sequence,
+      message: '開発モードのため、加工前の写真をそのまま表示します'
+    });
+    return true;
+  } catch (copyErr) {
+    addLog({
+      level: 'error',
+      event: 'entry:fallback',
+      sequence: entry.sequence,
+      message: `元の写真を控えられません: ${copyErr.message}`,
+      detail: { error: copyErr.stack || String(copyErr) }
+    });
+    return false;
   }
 }
 
@@ -1121,6 +1171,8 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       status: 'processing',
       error: null,
       errorCode: null,
+      // 加工できず、元の写真をそのまま出しているか(開発モードのみ)
+      fallback: false,
       sourceFileId,
       taskId: null,
       outputs: [],
@@ -1296,13 +1348,31 @@ router.post('/api/dev', requireBasicAuth, (req, res) => {
   }
 
   devMode = enabled;
-  if (!devMode && displayPlaceholders > 0) {
-    // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
-    displayPlaceholders = 0;
-    if (displayBatch.length === 0) {
-      displayMode = 'waiting';
+  if (!devMode) {
+    /*
+     * 開発モードのものを本番に持ち越さない。
+     * 加工前の写真をそのまま出している受付は、ここで消す。
+     * 残すと「未来のあなた」として加工されていない写真が出てしまう。
+     */
+    const fallbacks = [...entryStore.values()].filter((entry) => entry.fallback);
+    for (const entry of fallbacks) deleteEntry(entry.id);
+    if (fallbacks.length > 0) {
+      addLog({
+        level: 'warn',
+        event: 'dev:mode',
+        message: `加工前の写真で出していた受付 ${fallbacks.length}件を削除`
+      });
     }
-    displayUpdatedAtMs = Date.now();
+
+    if (displayPlaceholders > 0 || fallbacks.length > 0) {
+      // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
+      displayPlaceholders = 0;
+      displayBatch = displayBatch.filter((id) => entryStore.has(id));
+      if (displayBatch.length === 0) {
+        displayMode = 'waiting';
+      }
+      displayUpdatedAtMs = Date.now();
+    }
   }
 
   addLog({
