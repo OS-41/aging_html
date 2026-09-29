@@ -570,7 +570,10 @@
           <option value="5">5人（上3・下2）</option>
           <option value="6">6人</option>
         </select>
-        <span class="hint" style="margin:0">人数ごとの並びを確かめるための欄です</span>
+        <span class="hint" style="margin:0">
+          未表示の受付が1件も無いときだけ、この人数の見本を出します。
+          受付があるときは本番と同じ（届いた人数ぶん）で出ます。
+        </span>
       </p>
 
       <div class="stats">
@@ -591,7 +594,8 @@
         <b class="level-error">閲覧ブースの更新は無効です。</b>「結果画面に移行」「待機画面に移行」は受け付けません。
       </p>
       <p class="now-showing" id="devNote" hidden>
-        <b class="level-warn">開発モード中です。</b>撮影結果が足りない分は見本の画像で埋まり、撮影ブースには状態を選ぶ欄が出ます。
+        <b class="level-warn">開発モード中です。</b>撮影結果が1件も無いときは見本の画像で埋まり、撮影ブースには状態を選ぶ欄が出ます
+        （撮影結果があるときの表示は本番と同じです）。
         <b>本番前に必ず終了してください。</b>
       </p>
 
@@ -1109,11 +1113,16 @@
      * ボタンには、次に実際に出る人数を出す。
      * 未表示が上限より少なければその人数ぶんだけが並ぶので、
      * 「次の6人」と書いてあるのに4人しか出ない、ということが起きないようにする。
+     *
+     * 開発モードでも、実際の受付があるときは本番と同じ人数で出る。
+     * 見本が出るのは受付が1件も無いときだけ。
      */
-    const nextCount = devMode
-      ? Number(devCountSelect.value) || display.slot_count
-      : Math.min(waitingEntries, display.slot_count);
-    if (devMode) advanceBtn.textContent = `結果画面に移行（見本ふくめ${nextCount}人）`;
+    const realCount = Math.min(waitingEntries, display.slot_count);
+    const sampleOnly = devMode && realCount === 0;
+    const nextCount = sampleOnly
+      ? (Number(devCountSelect.value) || display.slot_count)
+      : realCount;
+    if (sampleOnly) advanceBtn.textContent = `結果画面に移行（見本${nextCount}人）`;
     else if (nextCount === 0) advanceBtn.textContent = '結果画面に移行（未表示なし）';
     else advanceBtn.textContent = `結果画面に移行（次の${nextCount}人）`;
     // 出せる人がいないときは押しても何も起きないので、押せなくしておく
