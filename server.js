@@ -1,24 +1,23 @@
 /**
- * file_idベースの画像アップロード・取得サーバー（Express.js）
+ * 2ブース構成(撮影ブース / 閲覧ブース)の展示用サーバー（Express.js）
  *
  * 事前にインストールが必要なパッケージ:
- *   npm install express multer cors
+ *   npm install express multer cors dotenv
  *
  * 起動方法:
  *   node server.js
  *   -> http://localhost:5000 で待ち受け
  *
- * フロントエンド(public/index.html)の配信は `npx serve public` で行う。
- * リポジトリのルートを静的配信すると .env / .git / uploads まで公開されて
- * しまうため、公開してよいファイルだけを置いた public/ 配下のみを配信する。
+ * 静的配信は public/ 配下だけに限る。リポジトリのルートを配信すると
+ * .env / .git / uploads / results まで公開されてしまうため。
  *
  * 画面:
- *   /               1台で完結する単体版(開発・動作確認用)
+ *   /               設営用の案内(各画面への行き先だけ)
  *   /capture.html   撮影ブース用
  *   /view.html      閲覧ブース用(職員が入れ替えるまで同じ内容を映し続ける)
  *   /staff.html     係員用(表示の操作・保管一覧・処理履歴)
  *
- * エンドポイント(2ブース構成):
+ * エンドポイント:
  *   POST   /api/entries                       写真を受け取り受付番号を返す。aging処理は裏で進む
  *   GET    /api/entries                       受付一覧(撮影時刻の古い順)
  *   GET    /api/entries/:id                   受付1件の詳細
@@ -29,13 +28,17 @@
  *   POST   /api/display/clear                 表示を消す(係員用)
  *   GET    /api/logs                          処理履歴(サーバー・クライアント双方)
  *   POST   /api/logs                          クライアントからの履歴を記録する
+ *   GET    /api/status                        各ブース・aging API・サーバーの状況
+ *   POST   /api/heartbeat                     各ブースからの生存確認
+ *   GET    /api/display                       閲覧ブースに映している内容
+ *   POST   /api/display/theme                 待機演出の絵柄を切り替える(係員用)
+ *   POST   /api/display/updates               閲覧ブースの入れ替えを許すか(係員用)
+ *   POST   /api/dev                           開発モードの出入り(係員用)
+ *   GET    /api/dev/placeholder/:index        開発モードの見本画像(SVG)
+ *   GET    /files/:file_id                    aging APIが元画像を取りに来る先。**唯一Basic認証の外**
  *
- * エンドポイント(単体版):
- *   POST /files   画像をアップロードし、file_idを返す
- *   GET  /files/:file_id   file_idに対応する画像を返す(aging APIがここから取得する)
- *   DELETE /files/:file_id file_idに対応する画像を削除する
- *   POST /api/aging/start/:file_id  アップロード済みfile_idを元にaging APIへタスクを開始する(APIキーはサーバー側の.envから使用)
- *   GET  /api/aging/:taskId         aging APIのタスク状況をポーリングする
+ * aging APIへの通信はすべてサーバー側で行う。ブラウザからaging APIを
+ * 叩く経路は置かない(APIキーを渡さずに済み、利用枠を使う入口も1つで済む)。
  *
  * APIキーはリポジトリに含めず、.env(.gitignore対象)の AGING_API_KEY に設定する。
  * .env.example を参考にすること。
@@ -227,6 +230,10 @@ const router = express.Router();
  */
 app.set('trust proxy', 1);
 
+// Expressであることを名乗らない。版に紐づく既知の弱点を探す手間を増やすだけの
+// 情報で、こちらが得るものは何も無い。
+app.disable('x-powered-by');
+
 app.use(express.json());
 
 //NOTE: ここからRender公開用の共通ヘッダー
@@ -249,6 +256,49 @@ app.use((req, res, next) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
   next();
+});
+
+/*
+ * 他所のページから引かれた「状態を変える要求」を断る(CSRF対策)。
+ *
+ * Basic認証は、一度通したブラウザが以後すべての要求に資格情報を自動で
+ * 付ける仕組み。そのため、係員画面を開いたままの端末で別のページを踏むと、
+ * そのページに置かれた <form action="…/api/display/advance"> が
+ * 資格情報つきで送られ、来場者の目の前で画面が切り替わってしまう。
+ * (本文の要る操作はexpress.jsonが弾くが、advance と clear は本文が要らない)
+ *
+ * Sec-Fetch-Site は、その要求がどこから出たかをブラウザ自身が付ける値で、
+ * ページ側から書き換えられない。同一オリジン以外からの状態変更は断る。
+ *
+ * ヘッダーが無いもの(curlや、この値を送らない古いブラウザ)は通す。
+ * 狙いはブラウザ経由の誘導だけで、そこは会場で使う端末すべてが対応している。
+ */
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+// 断ったことを履歴に残す間隔。誰でも(認証を通さなくても)送れる要求なので、
+// 1件ごとに残すと処理履歴500件を埋めて、本当に見たい記録を押し出せてしまう
+const CROSS_SITE_LOG_INTERVAL_MS = 60 * 1000;
+let crossSiteRejected = 0;
+let crossSiteLoggedAtMs = 0;
+
+app.use((req, res, next) => {
+  if (SAFE_METHODS.includes(req.method)) return next();
+
+  const site = req.get('sec-fetch-site');
+  // 'none' はアドレス欄やブックマークからの操作。'same-origin' は自分の画面
+  if (!site || site === 'same-origin' || site === 'none') return next();
+
+  crossSiteRejected += 1;
+  const now = Date.now();
+  if (now - crossSiteLoggedAtMs >= CROSS_SITE_LOG_INTERVAL_MS) {
+    crossSiteLoggedAtMs = now;
+    addLog({
+      level: 'warn',
+      event: 'request:cross-site',
+      status: 403,
+      message: `他所のページからの操作を拒否(直近 ${req.method} ${req.path} / 起動から計${crossSiteRejected}件)`
+    });
+  }
+  res.status(403).json({ error: '他のページからの操作は受け付けません' });
 });
 //NOTE: ここまでRender公開用の共通ヘッダー
 
@@ -280,9 +330,14 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 // file_id -> ファイル情報 の対応表（本番運用ではDB等に置き換える想定）
 const fileStore = new Map();
 
-// アップロードは認証なしで受け付けるため、保持上限と保持期間を設けて
-// ディスクを使い切られること(DoS)と、顔写真が無期限に残ることを防ぐ。
-const MAX_STORED_FILES = 100;
+/*
+ * 元画像の保持期間。
+ *
+ * 件数の上限は受付側(MAX_ENTRIES)で足りている。ここに入る元画像は
+ * POST /api/entries で受け付けた受付1件につき1枚だけで、aging APIが
+ * 取得し終えた時点(または失敗した時点)で消すため、常に処理中の数しか残らない。
+ * それでも取りこぼしに備えて期限を切る。顔写真を無期限に持たないためでもある。
+ */
 const FILE_TTL_MS = 30 * 60 * 1000; // 30分
 
 function deleteStoredFile(fileId) {
@@ -422,6 +477,18 @@ let logSequence = 0;
 // 定期的に届く鼓動(heartbeat)を記録する。一定時間途絶えたら切断とみなす。
 const CLIENT_OFFLINE_MS = 20 * 1000;
 const clientStore = new Map();
+
+/*
+ * 覚えておくブースの数。
+ *
+ * client_id はブラウザが名乗るだけの値なので、毎回違う値で鼓動を送られると
+ * 表がいくらでも膨らむ。会場で使うのは3〜5台なので、余裕をみた上限を置き、
+ * 溢れたら最も長く音沙汰のないものから捨てる。係員画面に出るのは実際に
+ * 動いているブースなので、捨てられるのは古い(もう使っていない)側になる。
+ */
+const MAX_CLIENTS = 32;
+// 名乗ってきたIDは、この長さに切ってから表の鍵として使う
+const CLIENT_ID_MAX_CHARS = 64;
 
 // aging APIとの通信状況
 const agingApiHealth = {
@@ -984,6 +1051,13 @@ async function downloadResultImage(entryId, index, output, sequence) {
     throw new Error(`結果画像を取得できませんでした (${res.status})`);
   }
 
+  // 申告された長さで先に断る。読み切ってから確かめると、その分を
+  // いったんメモリに載せることになる(Renderの512MBでは効く)
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > RESULT_IMAGE_MAX_BYTES) {
+    throw new Error('結果画像のサイズが大きすぎます');
+  }
+
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length > RESULT_IMAGE_MAX_BYTES) {
     throw new Error('結果画像のサイズが大きすぎます');
@@ -1432,14 +1506,23 @@ router.get('/api/dev/placeholder/:index', requireBasicAuth, (req, res) => {
  * 係員画面で「どのブースが今も繋がっているか」を見えるようにする。
  */
 router.post('/api/heartbeat', requireBasicAuth, (req, res) => {
-  const { client_id: clientId, role, page, latency_ms: latencyMs, error_count: errorCount } = req.body || {};
-  if (!clientId) {
+  const { client_id: rawClientId, role, page, latency_ms: latencyMs, error_count: errorCount } = req.body || {};
+  if (!rawClientId) {
     return res.status(400).json({ error: 'client_idが指定されていません' });
   }
 
+  // 表の鍵も切り詰めた値にする。切る前の値を鍵にすると、長さの違うだけの
+  // IDを送られたぶん表が伸びてしまう
+  const clientId = String(rawClientId).slice(0, CLIENT_ID_MAX_CHARS);
+
   const known = clientStore.get(clientId);
+  // 上限を超えたら、最も長く音沙汰のないものから捨てる
+  if (!known && clientStore.size >= MAX_CLIENTS) {
+    const oldest = [...clientStore.entries()].sort((a, b) => a[1].lastSeenMs - b[1].lastSeenMs)[0];
+    if (oldest) clientStore.delete(oldest[0]);
+  }
   clientStore.set(clientId, {
-    id: String(clientId).slice(0, 64),
+    id: clientId,
     role: String(role || 'unknown').slice(0, 32),
     page: String(page || '').slice(0, 64),
     firstSeenMs: known?.firstSeenMs || Date.now(),
@@ -1575,53 +1658,12 @@ router.get('/api/entries/:entry_id/images/:index', requireBasicAuth, (req, res) 
 });
 
 /**
- * POST /files
- * multipart/form-dataでフィールド名 "file" として画像を送信する
- * レスポンス例: { "file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
- */
-router.post('/files', requireBasicAuth, (req, res) => {
-  upload.single('file')(req, res, (err) => {
-    if (err) {
-      addLog({ level: 'warn', event: 'file:upload', status: 400, message: `受け取れません: ${err.message}` });
-      return res.status(400).json({ error: err.message });
-    }
-    if (!req.file) {
-      addLog({ level: 'warn', event: 'file:upload', status: 400, message: 'ファイルが送信されていません' });
-      return res.status(400).json({ error: 'ファイルが送信されていません' });
-    }
-
-    if (!isJpegFile(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-      addLog({ level: 'warn', event: 'file:upload', status: 400, message: 'JPEGとして認識できないファイル' });
-      return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
-    }
-
-    if (fileStore.size >= MAX_STORED_FILES) {
-      fs.unlinkSync(req.file.path);
-      addLog({ level: 'error', event: 'file:upload', status: 507, message: `保管上限 ${MAX_STORED_FILES} 件に達しています` });
-      return res.status(507).json({ error: '保存できるファイル数の上限に達しています。しばらく待ってから再試行してください' });
-    }
-
-    const fileId = req.generatedFileId;
-    const uploadedAtMs = Date.now();
-
-    fileStore.set(fileId, {
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      uploadedAtMs,
-      uploadedAt: new Date(uploadedAtMs).toISOString()
-    });
-
-    addLog({ event: 'file:upload', status: 201, message: `${Math.round(req.file.size / 1024)}KB を受け付け (${fileId})` });
-    res.status(201).json({ file_id: fileId });
-  });
-});
-
-/**
  * GET /files/:file_id
- * file_idに対応する画像バイナリを返す
+ *
+ * aging APIに渡した src_file_url の実体。**ここだけはBasic認証の外に置く。**
+ * 生成を頼む相手(aging API)が、こちらの資格情報を持たないまま元画像を
+ * 取りに来るため。file_idは推測できない値(UUID v4)で、生成が終わった時点で
+ * 消えるので、公開しているのは「たまたまURLを知り得た短い間だけ」になる。
  */
 router.get('/files/:file_id', (req, res) => {
   const fileInfo = fileStore.get(req.params.file_id);
@@ -1638,123 +1680,6 @@ router.get('/files/:file_id', (req, res) => {
   // 万一JPEG以外の内容が紛れ込んでも、ブラウザに別形式として解釈させない
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile(fileInfo.filePath);
-});
-
-/**
- * DELETE /files/:file_id
- * file_idに対応する画像を削除する
- */
-router.delete('/files/:file_id', requireBasicAuth, (req, res) => {
-  const fileInfo = fileStore.get(req.params.file_id);
-
-  if (!fileInfo) {
-    return res.status(404).json({ error: '指定されたfile_idは存在しません' });
-  }
-
-  fs.unlink(fileInfo.filePath, (err) => {
-    if (err && err.code !== 'ENOENT') {
-      return res.status(500).json({ error: '削除に失敗しました' });
-    }
-    fileStore.delete(req.params.file_id);
-    res.status(204).send();
-  });
-});
-
-/**
- * POST /api/aging/start/:file_id
- * 事前に POST /files でアップロード済みの file_id を指定してaging APIへ
- * タスク開始をリクエストするプロキシ。
- * aging API自体は画像バイナリではなく「外部から取得可能なURL」を要求するため、
- * このサーバーがホストしている GET /files/:file_id のURLをsrc_file_urlとして
- * 渡す必要がある。GitHub Codespacesのポート転送プロキシ経由だとリクエストの
- * Hostヘッダーが"localhost"に書き換えられてしまい外部から到達できないURLに
- * なってしまうため、ブラウザ側が既に把握している転送後の公開オリジンを
- * body.origin として送ってもらい、それを使って組み立てる。
- * ただしbody.originはクライアントが自由に指定できてしまうため、そのまま
- * 外部APIに渡すと任意のURLを取得させる踏み台(SSRF)にできてしまう。
- * .envのPUBLIC_ORIGINが設定されていればそれを優先し、無い場合でも
- * Codespacesの転送URLかローカル開発用のホストのみを許可する。
- * APIキーはクライアントに渡さず、ここ(サーバー側)でのみ.envから読んで付与する。
- * body: { "origin": "https://xxxx-5000.app.github.dev" }
- */
-router.post('/api/aging/start/:file_id', requireBasicAuth, async (req, res) => {
-  if (!AGING_API_KEY) {
-    addLog({ level: 'error', event: 'aging:start', status: 500, message: 'AGING_API_KEYが設定されていません' });
-    return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
-  }
-  const fileInfo = fileStore.get(req.params.file_id);
-  if (!fileInfo) {
-    addLog({ level: 'warn', event: 'aging:start', status: 404, message: `存在しないfile_id: ${req.params.file_id}` });
-    return res.status(404).json({ error: '指定されたfile_idは存在しません' });
-  }
-
-  const origin = resolvePublicOrigin(req.body?.origin);
-  if (!origin) {
-    addLog({ level: 'warn', event: 'aging:start', status: 400, message: `許可されていないorigin: ${req.body?.origin}` });
-    return res.status(400).json({ error: '許可されていないoriginです(Codespacesの転送URLを指定してください)' });
-  }
-
-  const srcFileUrl = `${origin}${BASE_PATH}/files/${req.params.file_id}`;
-
-  try {
-    const apiRes = await fetch(AGING_API_BASE_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${AGING_API_KEY}`
-      },
-      body: JSON.stringify({
-        request_id: 0,
-        src_file_url: srcFileUrl
-      })
-    });
-    const payload = await apiRes.json().catch(() => ({}));
-    recordAgingApiCall(apiRes.status, apiRes.ok ? null : payload?.error_message || null);
-    addLog({
-      level: apiRes.ok ? 'info' : 'error',
-      event: 'aging:start',
-      status: apiRes.status,
-      message: apiRes.ok ? `生成を依頼 (task_id: ${payload?.data?.task_id ?? '不明'})` : `依頼に失敗: ${payload?.error_message ?? ''}`
-    });
-    res.status(apiRes.status).json(payload);
-  } catch (err) {
-    recordAgingApiCall(null, err.message);
-    addLog({ level: 'error', event: 'aging:start', message: `aging APIへ接続できません: ${err.message}` });
-    res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
-  }
-});
-
-/**
- * GET /api/aging/:taskId
- * aging APIのタスク状況をポーリングするプロキシ。
- */
-router.get('/api/aging/:taskId', requireBasicAuth, async (req, res) => {
-  if (!AGING_API_KEY) {
-    addLog({ level: 'error', event: 'aging:poll', status: 500, message: 'AGING_API_KEYが設定されていません' });
-    return res.status(500).json({ error: 'サーバーにAGING_API_KEYが設定されていません(.envを確認してください)' });
-  }
-  try {
-    const apiRes = await fetch(`${AGING_API_BASE_URL}/${req.params.taskId}`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${AGING_API_KEY}` }
-    });
-    const payload = await apiRes.json().catch(() => ({}));
-    recordAgingApiCall(apiRes.status, apiRes.ok ? null : payload?.error_message || null);
-    // 進行確認は短い間隔で何度も来るため、異常時だけ履歴に残す
-    if (!apiRes.ok) {
-      addLog({
-        level: 'error',
-        event: 'aging:poll',
-        status: apiRes.status,
-        message: `進行確認に失敗: ${payload?.error_message ?? ''}`
-      });
-    }
-    res.status(apiRes.status).json(payload);
-  } catch (err) {
-    recordAgingApiCall(null, err.message);
-    addLog({ level: 'error', event: 'aging:poll', message: `aging APIへ接続できません: ${err.message}` });
-    res.status(502).json({ error: 'aging APIへの接続に失敗しました', detail: err.message });
-  }
 });
 
 //NOTE: ここからRender公開用の配信設定。フロントエンドとAPIを同一オリジンで配信し、全体をAPP_BASE_PATHの推測困難なパス配下に隠す。Renderのヘルスチェックだけは認証と公開パスの外に置く必要があるため別扱いにしている
