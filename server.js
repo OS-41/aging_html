@@ -1096,9 +1096,14 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     entry.viewedAtMs = now;
   }
   displayBatch = next.map((entry) => entry.id);
-  // 開発モードでは選んだ人数になるまで見本で埋める。
-  // 通常は届いた人数ぶんだけを並べる(空きは作らない)。
-  displayPlaceholders = devMode ? Math.max(0, devPlaceholderCount - next.length) : 0;
+  /*
+   * 並べるのは届いた人数ぶんだけ(空きは作らない)。
+   *
+   * 開発モードでも、実際の受付があるときは本番とまったく同じ人数で出す。
+   * 見本で水増しすると、本物の写真が出ているときの見え方が変わってしまうため。
+   * 受付が1件も無いときだけ、選んだ人数を見本で埋める。
+   */
+  displayPlaceholders = devMode && next.length === 0 ? devPlaceholderCount : 0;
   displayUpdatedAtMs = now;
   displayMode = 'results';
 
@@ -1185,9 +1190,10 @@ router.post('/api/dev', requireBasicAuth, (req, res) => {
       return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} で指定してください` });
     }
     devPlaceholderCount = wanted;
-    // すでに見本を出しているなら、その場で枚数を合わせる
-    if (devMode && displayPlaceholders > 0) {
-      displayPlaceholders = Math.max(0, devPlaceholderCount - displayBatch.length);
+    // すでに見本だけを出しているなら、その場で枚数を合わせる
+    // (本物の受付を出しているときは触らない。本番と同じ見え方を保つため)
+    if (devMode && displayPlaceholders > 0 && displayBatch.length === 0) {
+      displayPlaceholders = devPlaceholderCount;
       displayUpdatedAtMs = Date.now();
     }
   }
