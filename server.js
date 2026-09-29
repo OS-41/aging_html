@@ -81,20 +81,86 @@ function safeEqual(a, b) {
  * 来場者の操作を妨げずに第三者のアクセスだけを遮断できる。
  * BASIC_AUTH_USER / BASIC_AUTH_PASSWORD が未設定の場合は素通しする。
  */
-function requireBasicAuth(req, res, next) {
+/*
+ * 認証に失敗した回数を接続元ごとに数え、続くようなら応答を遅らせる。
+ *
+ * 狙いは2つ。
+ *  - 誰かが入口を叩いていることを、係員画面の処理履歴に残す
+ *  - 総当たりの速さを落とす(1件あたり2秒待たせる)
+ *
+ * **正しい資格情報は、失敗が続いたあとでも必ず通す。** 締め出す作りにすると
+ * 係員が打ち間違えたときに自分たちが入れなくなる。正しい値を知っている
+ * 相手を止めても意味はないので、遅らせるのは間違えた側だけにする。
+ */
+const AUTH_FAIL_LIMIT = 20;
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // 10分
+const AUTH_FAIL_DELAY_MS = 2000;
+const authFailures = new Map();
+
+setInterval(() => {
+  const expiry = Date.now() - AUTH_FAIL_WINDOW_MS;
+  for (const [key, record] of authFailures) {
+    if (record.lastAtMs < expiry) authFailures.delete(key);
+  }
+}, 60 * 1000).unref();
+
+/**
+ * 認証の失敗を数える。遅らせる段階に入っていたら true を返す。
+ * @param {string} source - 接続元
+ */
+function recordAuthFailure(source) {
+  const now = Date.now();
+  const record = authFailures.get(source) || { count: 0, lastAtMs: 0 };
+  // 前の失敗から時間が空いていれば数え直す
+  if (now - record.lastAtMs > AUTH_FAIL_WINDOW_MS) record.count = 0;
+  record.count += 1;
+  record.lastAtMs = now;
+  authFailures.set(source, record);
+
+  if (record.count === AUTH_FAIL_LIMIT) {
+    addLog({
+      level: 'error',
+      event: 'auth:throttled',
+      status: 401,
+      message: `${source} からの認証失敗が${record.count}回。以後この接続元への応答を遅らせます`
+    });
+  } else if (record.count === 1 || record.count % 5 === 0) {
+    // 履歴を埋めないよう、最初と5回ごとだけ残す
+    addLog({
+      level: 'warn',
+      event: 'auth:failed',
+      status: 401,
+      message: `${source} から認証に失敗(${record.count}回目)`
+    });
+  }
+
+  return record.count >= AUTH_FAIL_LIMIT;
+}
+
+async function requireBasicAuth(req, res, next) {
   if (!BASIC_AUTH_USER || !BASIC_AUTH_PASSWORD) {
     return next();
   }
 
+  const source = req.ip || 'unknown';
   const [scheme, encoded] = (req.get('authorization') || '').split(' ');
+
   if (scheme === 'Basic' && encoded) {
     const decoded = Buffer.from(encoded, 'base64').toString();
     const separator = decoded.indexOf(':');
     const user = decoded.slice(0, separator);
     const password = decoded.slice(separator + 1);
     if (safeEqual(user, BASIC_AUTH_USER) && safeEqual(password, BASIC_AUTH_PASSWORD)) {
+      // 通ったら数え直す(打ち間違えたあとも尾を引かない)
+      authFailures.delete(source);
       return next();
     }
+  }
+
+  // 資格情報を送ってこなかった最初の1回は、ブラウザが必ず出す普通の流れ。
+  // 数えるのは「送ってきたが違った」場合だけにする
+  if (encoded && recordAuthFailure(source)) {
+    await new Promise((resolve) => setTimeout(resolve, AUTH_FAIL_DELAY_MS));
   }
 
   res.set('WWW-Authenticate', 'Basic realm="aging", charset="UTF-8"');
@@ -153,7 +219,38 @@ function isDevelopmentOrigin(candidate) {
 // ルート定義はrouterにまとめ、公開パス(BASE_PATH)配下へまとめてマウントする
 const router = express.Router();
 
+/*
+ * Renderはリバースプロキシの後ろでアプリを動かす。1段だけ信用して、
+ * X-Forwarded-For の先頭を接続元として扱う(認証の失敗回数を接続元ごとに
+ * 数えるため)。信用しないと全員が同じ接続元に見え、1人の総当たりで
+ * ブースまで締め出してしまう。
+ */
+app.set('trust proxy', 1);
+
 app.use(express.json());
+
+//NOTE: ここからRender公開用の共通ヘッダー
+/*
+ * どの応答にも付ける安全側のヘッダー。
+ *
+ * - Strict-Transport-Security: 以後このホストへはHTTPSでしか繋がせない
+ *   (Basic認証は毎回資格情報を送るため、平文で出す機会を作らない)
+ * - Referrer-Policy: 外部へ出ていく通信に参照元URLを載せない。
+ *   公開パスは推測困難であることが前提なので、外部に渡す機会を作らない
+ *   (最近のブラウザは既定でもパスまでは送らないが、明示しておく)
+ * - X-Content-Type-Options: 中身を見て型を推測させない
+ * - X-Frame-Options: 他所のページの枠に埋め込ませない
+ */
+app.use((req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  if (PUBLIC_ORIGIN) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
+//NOTE: ここまでRender公開用の共通ヘッダー
 
 //NOTE: ここからRender公開用のCORS設定。公開時はフロントとAPIを同一オリジンで配信するためCORSそのものが不要になる
 // 本番(PUBLIC_ORIGINあり)ではCORSヘッダーを一切付けない。ブラウザの
@@ -624,6 +721,8 @@ function toPublicEntry(entry) {
     status: entry.status,
     error: entry.error,
     error_code: entry.errorCode,
+    // 加工できず、元の写真をそのまま出しているもの(開発モードのみ)
+    fallback: entry.fallback === true,
     files,
     captured_at: new Date(entry.capturedAtMs).toISOString(),
     viewed_at: entry.viewedAtMs ? new Date(entry.viewedAtMs).toISOString() : null,
@@ -941,6 +1040,11 @@ async function processEntry(entry, origin) {
     entry.status = 'error';
     entry.error = err.message;
     entry.errorCode = err.code || null;
+
+    // 開発モードのときは、加工できなかった写真を「元のまま」出せるようにする。
+    // APIのユニットが無い状態でも、撮影から閲覧までを実際の写真で通せる。
+    const shown = devMode ? await keepOriginalAsResult(entry) : false;
+
     if (entry.sourceFileId) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
@@ -951,9 +1055,52 @@ async function processEntry(entry, origin) {
       sequence: entry.sequence,
       // 一覧には原因の頭だけ(describeAgingErrorの summary にあたる部分)。
       // コードやAPIの原文、例外の全文は詳細で見る
-      message: (err.message || '生成に失敗').split(' / ')[0],
+      message: (err.message || '生成に失敗').split(' / ')[0]
+        + (shown ? '(開発モード: 元の写真を表示します)' : ''),
       detail: { error: err.stack || String(err) }
     });
+  }
+}
+
+/**
+ * 加工できなかった受付を、元の写真のまま閲覧ブースに出せるようにする。
+ *
+ * **開発モードのときだけ呼ぶ。** 本番でこれをやると、加工されていない写真が
+ * 「未来のあなた」として出てしまう。
+ *
+ * 元の写真は uploads 側の保持期間で消えるため、results 側へ複製して
+ * 受付と寿命を揃える(受付を削除すれば一緒に消える)。
+ *
+ * @param {object} entry
+ * @returns {Promise<boolean>} 出せるようにできたか
+ */
+async function keepOriginalAsResult(entry) {
+  const source = entry.sourceFileId && fileStore.get(entry.sourceFileId);
+  if (!source) return false;
+
+  try {
+    const filePath = path.join(RESULTS_DIR, `${entry.id}-original.jpg`);
+    await fs.promises.copyFile(source.filePath, filePath);
+    // 年齢は無い。閲覧ブースと係員画面はこれを見て「元の写真」と分かる
+    entry.outputs = [{ resAge: null, filePath }];
+    entry.fallback = true;
+    entry.status = 'ready';
+    addLog({
+      level: 'warn',
+      event: 'entry:fallback',
+      sequence: entry.sequence,
+      message: '開発モードのため、加工前の写真をそのまま表示します'
+    });
+    return true;
+  } catch (copyErr) {
+    addLog({
+      level: 'error',
+      event: 'entry:fallback',
+      sequence: entry.sequence,
+      message: `元の写真を控えられません: ${copyErr.message}`,
+      detail: { error: copyErr.stack || String(copyErr) }
+    });
+    return false;
   }
 }
 
@@ -1024,6 +1171,8 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       status: 'processing',
       error: null,
       errorCode: null,
+      // 加工できず、元の写真をそのまま出しているか(開発モードのみ)
+      fallback: false,
       sourceFileId,
       taskId: null,
       outputs: [],
@@ -1199,13 +1348,31 @@ router.post('/api/dev', requireBasicAuth, (req, res) => {
   }
 
   devMode = enabled;
-  if (!devMode && displayPlaceholders > 0) {
-    // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
-    displayPlaceholders = 0;
-    if (displayBatch.length === 0) {
-      displayMode = 'waiting';
+  if (!devMode) {
+    /*
+     * 開発モードのものを本番に持ち越さない。
+     * 加工前の写真をそのまま出している受付は、ここで消す。
+     * 残すと「未来のあなた」として加工されていない写真が出てしまう。
+     */
+    const fallbacks = [...entryStore.values()].filter((entry) => entry.fallback);
+    for (const entry of fallbacks) deleteEntry(entry.id);
+    if (fallbacks.length > 0) {
+      addLog({
+        level: 'warn',
+        event: 'dev:mode',
+        message: `加工前の写真で出していた受付 ${fallbacks.length}件を削除`
+      });
     }
-    displayUpdatedAtMs = Date.now();
+
+    if (displayPlaceholders > 0 || fallbacks.length > 0) {
+      // 見本を出したまま本番に戻さない。実際の受付が1件も無ければ待機画面へ。
+      displayPlaceholders = 0;
+      displayBatch = displayBatch.filter((id) => entryStore.has(id));
+      if (displayBatch.length === 0) {
+        displayMode = 'waiting';
+      }
+      displayUpdatedAtMs = Date.now();
+    }
   }
 
   addLog({
