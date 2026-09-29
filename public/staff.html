@@ -147,11 +147,27 @@
     min-height: 0;
   }
   .panel[open] > .panel-body { min-height: 0; }
-  .panel-shell.is-sized > .panel { flex: 1; min-height: 0; }
-  .panel-shell.is-sized .panel-body {
+  /*
+   * 高さを決めた欄は、その高さのまま。入りきらない分は欄の中を送って見る
+   * (中身に合わせて欄が伸び縮みすることはない)。
+   *
+   * 送るのは <details> 自身にさせる。<details> の中身はブラウザが
+   * ::details-content という箱で包むので、.panel-body に flex を指定しても
+   * その箱には効かず、中身が欄からはみ出してしまうため。
+   * 見出しは送っても残るように貼り付ける。
+   */
+  .panel-shell.is-sized > .panel {
     flex: 1;
+    min-height: 0;
     overflow: auto;
   }
+  .panel-shell.is-sized > .panel > summary {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface);
+  }
+  /* 欄の側で送るので、表ごとの高さの上限は外す */
   .panel-shell.is-sized .table-scroll { max-height: none; }
   .panel-resize {
     height: 14px;
