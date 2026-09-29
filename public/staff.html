@@ -554,8 +554,23 @@
         <summary><h2>表示の制御</h2></summary>
       <div class="panel-body">
       <p class="hint">
-        「結果画面に移行」で、まだ表示していない古い順に<span id="slotCountHint">—</span>人分をまとめて閲覧ブースへ出します。
+        「結果画面に移行」で、まだ表示していない古い順に<b>最大<span id="slotCountHint">—</span>人分</b>を
+        まとめて閲覧ブースへ出します。未表示がそれより少なければ、その人数ぶんだけを並べます
+        （4人なら4枚で画面を使い切ります）。
         「待機画面に移行」に戻すと、閲覧ブースは背景の演出だけになります。
+      </p>
+
+      <p class="now-showing" id="devCountRow" hidden>
+        見本で埋める人数
+        <select id="devCountSelect">
+          <option value="1">1人（全画面）</option>
+          <option value="2">2人</option>
+          <option value="3">3人（上2・下1）</option>
+          <option value="4">4人</option>
+          <option value="5">5人（上3・下2）</option>
+          <option value="6">6人</option>
+        </select>
+        <span class="hint" style="margin:0">人数ごとの並びを確かめるための欄です</span>
       </p>
 
       <div class="stats">
@@ -682,6 +697,8 @@
   const noticeText = document.getElementById('noticeText');
   const noticeDismiss = document.getElementById('noticeDismiss');
   const slotCountHint = document.getElementById('slotCountHint');
+  const devCountRow = document.getElementById('devCountRow');
+  const devCountSelect = document.getElementById('devCountSelect');
   const advanceBtn = document.getElementById('advanceBtn');
   const clearBtn = document.getElementById('clearBtn');
   const displayModeEl = document.getElementById('displayMode');
@@ -720,6 +737,9 @@
 
   // 最初に見たサーバーの起動時刻。これが変わったら再起動したということ
   let knownServerStart = null;
+
+  // まだ表示していない受付の数。次に何人出るかの表示に使う
+  let waitingEntries = 0;
 
   const timeText = (iso) => new Date(iso).toLocaleTimeString('ja-JP', { hour12: false });
 
@@ -1081,10 +1101,23 @@
     devBtn.textContent = devMode ? '開発モードを終了する' : '開発モードに入る';
     devBtn.classList.toggle('is-on', devMode);
     devNote.hidden = !devMode;
-    // 開発モードでは足りない分が見本で埋まるため、ボタンの文言でそれを示す
-    advanceBtn.textContent = devMode
-      ? `結果画面に移行（次の${display.slot_count}人・不足分は見本）`
-      : `結果画面に移行（次の${display.slot_count}人）`;
+    devCountRow.hidden = !devMode;
+    if (display.dev_placeholder_count && document.activeElement !== devCountSelect) {
+      devCountSelect.value = String(display.dev_placeholder_count);
+    }
+    /*
+     * ボタンには、次に実際に出る人数を出す。
+     * 未表示が上限より少なければその人数ぶんだけが並ぶので、
+     * 「次の6人」と書いてあるのに4人しか出ない、ということが起きないようにする。
+     */
+    const nextCount = devMode
+      ? Number(devCountSelect.value) || display.slot_count
+      : Math.min(waitingEntries, display.slot_count);
+    if (devMode) advanceBtn.textContent = `結果画面に移行（見本ふくめ${nextCount}人）`;
+    else if (nextCount === 0) advanceBtn.textContent = '結果画面に移行（未表示なし）';
+    else advanceBtn.textContent = `結果画面に移行（次の${nextCount}人）`;
+    // 出せる人がいないときは押しても何も起きないので、押せなくしておく
+    advanceBtn.disabled = !updatesEnabled || (!devMode && nextCount === 0);
     // 今どちらの画面が出ているかを取り違えないよう、状態をそのまま出す
     displayModeEl.textContent = showingResults ? '結果画面' : '待機画面';
     advanceBtn.classList.toggle('primary', !showingResults);
@@ -1114,6 +1147,7 @@
       return;
     }
 
+    waitingEntries = data.waiting;
     waitingCount.textContent = String(data.waiting);
     processingCount.textContent = String(data.processing);
     errorCount.textContent = String(data.entries.filter((entry) => entry.status === 'error').length);
@@ -1182,6 +1216,22 @@
       alert('切り替えられませんでした。通信状況を確認してください');
     } finally {
       devBtn.disabled = false;
+    }
+  });
+
+  // 見本で埋める人数。人数ごとの並びを確かめるための欄(開発モード中だけ出る)
+  devCountSelect.addEventListener('change', async () => {
+    devCountSelect.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/dev', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true, placeholders: Number(devCountSelect.value) })
+      }));
+    } catch (err) {
+      alert('人数を変えられませんでした。通信状況を確認してください');
+    } finally {
+      devCountSelect.disabled = false;
     }
   });
 

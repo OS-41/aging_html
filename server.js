@@ -300,6 +300,11 @@ let devMode = false;
 // 結果画面のうち、見本で埋めている区画の数(開発モードのときだけ0より大きい)
 let displayPlaceholders = 0;
 
+// 開発モードで結果画面を埋めるときの人数。
+// 本番は届いた人数ぶんだけを並べるので、人数ごとの並び(1人なら全画面、
+// 3人なら上2枚+下1枚)を確かめるには、ここで人数を選べる必要がある。
+let devPlaceholderCount = DISPLAY_SLOT_COUNT;
+
 // 見本画像の寸法。よくあるWebカメラのフレーム(4:3)に合わせてある。
 // 閲覧ブースは最初に届いた画像の縦横比で区画を組み直すため、見本でも
 // 本番に近い並びが確認できる。
@@ -596,6 +601,7 @@ function currentDisplay() {
     updates_enabled: displayUpdatesEnabled,
     dev_mode: devMode,
     placeholders,
+    dev_placeholder_count: devPlaceholderCount,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
     entries
@@ -1090,7 +1096,9 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     entry.viewedAtMs = now;
   }
   displayBatch = next.map((entry) => entry.id);
-  displayPlaceholders = devMode ? DISPLAY_SLOT_COUNT - next.length : 0;
+  // 開発モードでは選んだ人数になるまで見本で埋める。
+  // 通常は届いた人数ぶんだけを並べる(空きは作らない)。
+  displayPlaceholders = devMode ? Math.max(0, devPlaceholderCount - next.length) : 0;
   displayUpdatedAtMs = now;
   displayMode = 'results';
 
@@ -1160,14 +1168,28 @@ router.post('/api/display/updates', requireBasicAuth, (req, res) => {
 
 /**
  * POST /api/dev
- * 開発モードの出入り(係員用)。
+ * 開発モードの出入りと、見本で埋める人数の指定(係員用)。
  * 抜けるときは、出していた見本をその場で片付ける。
- * body: { "enabled": true | false }
+ * body: { "enabled": true | false, "placeholders": 1〜DISPLAY_SLOT_COUNT }
  */
 router.post('/api/dev', requireBasicAuth, (req, res) => {
   const enabled = req.body?.enabled;
   if (typeof enabled !== 'boolean') {
     return res.status(400).json({ error: 'enabled には true か false を指定してください' });
+  }
+
+  // 人数ごとの並びを確かめられるよう、見本の枚数を選べる
+  const wanted = Number(req.body?.placeholders);
+  if (Number.isInteger(wanted)) {
+    if (wanted < 1 || wanted > DISPLAY_SLOT_COUNT) {
+      return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} で指定してください` });
+    }
+    devPlaceholderCount = wanted;
+    // すでに見本を出しているなら、その場で枚数を合わせる
+    if (devMode && displayPlaceholders > 0) {
+      displayPlaceholders = Math.max(0, devPlaceholderCount - displayBatch.length);
+      displayUpdatedAtMs = Date.now();
+    }
   }
 
   devMode = enabled;

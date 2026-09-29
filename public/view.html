@@ -23,15 +23,26 @@
     gap: 1.4vh;
   }
 
+  /*
+   * 人数ぶんの区画を、上下2段までに分けて並べる(applyLayout)。
+   * 奇数のときは上段が1枚多くなるので、段ごとに枚数が違う。
+   * 格子(grid)だと段ごとに枚数を変えられないため、段を横並びの箱にして
+   * それぞれ中央に寄せる。区画の大きさは両段で同じ値をJSで決める。
+   */
   .slots {
     width: 100%;
     flex: 1;
-    display: grid;
-    gap: 0.7vw;
-    /* 区画は写真と同じ形・同じ大きさにする(applyGrid)。
-       余った分は上下左右に均等に残す */
+    display: flex;
+    flex-direction: column;
     justify-content: center;
-    align-content: center;
+    align-items: center;
+    gap: 0.7vw;
+  }
+  .slot-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.7vw;
   }
   /* 待機画面は背景の演出だけを見せる(結果の区画も出さない) */
   .slots.is-waiting { display: none; }
@@ -42,6 +53,7 @@
    */
   .slot {
     position: relative;
+    flex: none;
     background: var(--surface);
     border-radius: 16px;
     overflow: hidden;
@@ -382,62 +394,58 @@
   let rendered = false;
 
   /**
-   * 人数に応じて画面を区切る。
+   * 人数を上下2段に振り分ける。
    *
-   * 正方形に近い分割(√n)ではなく、写真がいちばん大きく収まる列数を選ぶ。
-   * 結果は横長なので、区画が正方形に近いほど上下が余ってしまう。
-   * 何列がよいかは画面の形で変わる(6人ならiPadは2列、MacBookは3列)ため、
-   * 表示のたびと画面の大きさが変わったときに計算し直す。
+   *  1人   … 段に分けず、画面いっぱいに1枚
+   *  2人以上… 上下2段。奇数のときは上段を1枚多くする(3人なら2+1)
+   *
+   * 1枚を大きく見せたいので、段を増やして小さくすることはしない。
+   * @param {number} count
+   * @returns {number[]} 段ごとの枚数
    */
-  function applyGrid(count) {
-    slotCount = count;
-    const rect = slotsEl.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-
-    const gap = parseFloat(getComputedStyle(slotsEl).columnGap) || 0;
-    const cols = bestColumnCount(count, rect.width, rect.height, gap);
-    const rows = Math.ceil(count / cols);
-
-    // 区画を写真と同じ形にして、白い帯が出ないようにする
-    const cellWidth = (rect.width - gap * (cols - 1)) / cols;
-    const cellHeight = (rect.height - gap * (rows - 1)) / rows;
-    const width = Math.max(1, Math.min(cellWidth, cellHeight * photoAspect));
-    const height = width / photoAspect;
-
-    slotsEl.style.gridTemplateColumns = `repeat(${cols}, ${width}px)`;
-    slotsEl.style.gridTemplateRows = `repeat(${rows}, ${height}px)`;
+  function rowsFor(count) {
+    if (count <= 1) return [Math.max(count, 0)];
+    return [Math.ceil(count / 2), Math.floor(count / 2)];
   }
 
   /**
-   * 実際に届いた画像の縦横比を、列数の計算に取り込む。
+   * 人数に応じて区画の大きさを決める。
+   *
+   * 区画は写真と同じ形にして、白い帯が出ないようにする。
+   * 両方の段で同じ大きさになるよう、枚数の多い段を基準に幅を決める。
+   * 画面の形や写真の縦横比で変わるので、表示のたびと画面が変わるたびに
+   * 計算し直す。
+   * @param {number} count
+   */
+  function applyLayout(count) {
+    slotCount = count;
+    const rect = slotsEl.getBoundingClientRect();
+    if (!rect.width || !rect.height || count <= 0) return;
+
+    const gap = parseFloat(getComputedStyle(slotsEl).rowGap) || 0;
+    const rows = rowsFor(count);
+    const widest = Math.max(...rows);
+
+    const cellWidth = (rect.width - gap * (widest - 1)) / widest;
+    const cellHeight = (rect.height - gap * (rows.length - 1)) / rows.length;
+    const width = Math.max(1, Math.min(cellWidth, cellHeight * photoAspect));
+    const height = width / photoAspect;
+
+    for (const slot of slotsEl.querySelectorAll('.slot')) {
+      slot.style.width = `${width}px`;
+      slot.style.height = `${height}px`;
+    }
+  }
+
+  /**
+   * 実際に届いた画像の縦横比を、区画の大きさに取り込む。
    * 目安と大きく違ったときだけ並べ直す(毎回やると無駄に組み直すため)。
    * @param {number} aspect
    */
   function adoptPhotoAspect(aspect) {
     if (!aspect || Math.abs(aspect - photoAspect) / photoAspect < 0.05) return;
     photoAspect = aspect;
-    if (slotCount > 0) applyGrid(slotCount);
-  }
-
-  /**
-   * 区画に収まる写真がいちばん大きくなる列数を求める。
-   * @param {number} count - 並べる人数
-   * @param {number} width,height - 並べる領域の大きさ
-   * @param {number} gap - 区画のすき間
-   */
-  function bestColumnCount(count, width, height, gap) {
-    let best = { cols: Math.ceil(Math.sqrt(count)), area: 0 };
-    for (let cols = 1; cols <= count; cols++) {
-      const rows = Math.ceil(count / cols);
-      const cellWidth = (width - gap * (cols - 1)) / cols;
-      const cellHeight = (height - gap * (rows - 1)) / rows;
-      if (cellWidth <= 0 || cellHeight <= 0) continue;
-      // 区画に横長の写真を収めたときの大きさ
-      const photoWidth = Math.min(cellWidth, cellHeight * photoAspect);
-      const area = photoWidth * (photoWidth / photoAspect);
-      if (area > best.area) best = { cols, area };
-    }
-    return best.cols;
+    if (slotCount > 0) applyLayout(slotCount);
   }
 
   function buildSlot(entry) {
@@ -499,13 +507,6 @@
     );
   }
 
-  function buildEmptySlot() {
-    const slot = document.createElement('div');
-    slot.className = 'slot is-empty';
-    slot.textContent = '準備中';
-    return slot;
-  }
-
   function render(display) {
     // 待機画面のときは背景の演出だけにする。区画は組み立てず、枠も出さない
     const showingResults = display.mode === 'results';
@@ -514,13 +515,20 @@
     slotsEl.classList.toggle('is-waiting', !showingResults);
 
     if (showingResults) {
-      applyGrid(display.slot_count);
-      const children = [];
-      for (let i = 0; i < display.slot_count; i++) {
-        const entry = display.entries[i];
-        children.push(entry ? buildSlot(entry) : buildEmptySlot());
-      }
+      // 並べるのは届いている人数ぶんだけ。空きは作らない
+      // (4人なら4枚で画面を使い切る)
+      const entries = display.entries;
+      const rows = rowsFor(entries.length);
+      let index = 0;
+      const children = rows.filter((n) => n > 0).map((n) => {
+        const row = document.createElement('div');
+        row.className = 'slot-row';
+        row.append(...entries.slice(index, index + n).map(buildSlot));
+        index += n;
+        return row;
+      });
       slotsEl.replaceChildren(...children);
+      applyLayout(entries.length);
     } else {
       slotsEl.replaceChildren();
     }
@@ -701,9 +709,9 @@
 
   window.addEventListener('resize', () => {
     resizeOcean();
-    // 画面の形が変われば最適な列数も変わる
+    // 画面の形が変われば区画の大きさも変わる
     if (slotCount > 0 && !slotsEl.classList.contains('is-waiting')) {
-      applyGrid(slotCount);
+      applyLayout(slotCount);
     }
   });
   resizeOcean();
