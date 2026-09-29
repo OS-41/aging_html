@@ -81,20 +81,86 @@ function safeEqual(a, b) {
  * 来場者の操作を妨げずに第三者のアクセスだけを遮断できる。
  * BASIC_AUTH_USER / BASIC_AUTH_PASSWORD が未設定の場合は素通しする。
  */
-function requireBasicAuth(req, res, next) {
+/*
+ * 認証に失敗した回数を接続元ごとに数え、続くようなら応答を遅らせる。
+ *
+ * 狙いは2つ。
+ *  - 誰かが入口を叩いていることを、係員画面の処理履歴に残す
+ *  - 総当たりの速さを落とす(1件あたり2秒待たせる)
+ *
+ * **正しい資格情報は、失敗が続いたあとでも必ず通す。** 締め出す作りにすると
+ * 係員が打ち間違えたときに自分たちが入れなくなる。正しい値を知っている
+ * 相手を止めても意味はないので、遅らせるのは間違えた側だけにする。
+ */
+const AUTH_FAIL_LIMIT = 20;
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // 10分
+const AUTH_FAIL_DELAY_MS = 2000;
+const authFailures = new Map();
+
+setInterval(() => {
+  const expiry = Date.now() - AUTH_FAIL_WINDOW_MS;
+  for (const [key, record] of authFailures) {
+    if (record.lastAtMs < expiry) authFailures.delete(key);
+  }
+}, 60 * 1000).unref();
+
+/**
+ * 認証の失敗を数える。遅らせる段階に入っていたら true を返す。
+ * @param {string} source - 接続元
+ */
+function recordAuthFailure(source) {
+  const now = Date.now();
+  const record = authFailures.get(source) || { count: 0, lastAtMs: 0 };
+  // 前の失敗から時間が空いていれば数え直す
+  if (now - record.lastAtMs > AUTH_FAIL_WINDOW_MS) record.count = 0;
+  record.count += 1;
+  record.lastAtMs = now;
+  authFailures.set(source, record);
+
+  if (record.count === AUTH_FAIL_LIMIT) {
+    addLog({
+      level: 'error',
+      event: 'auth:throttled',
+      status: 401,
+      message: `${source} からの認証失敗が${record.count}回。以後この接続元への応答を遅らせます`
+    });
+  } else if (record.count === 1 || record.count % 5 === 0) {
+    // 履歴を埋めないよう、最初と5回ごとだけ残す
+    addLog({
+      level: 'warn',
+      event: 'auth:failed',
+      status: 401,
+      message: `${source} から認証に失敗(${record.count}回目)`
+    });
+  }
+
+  return record.count >= AUTH_FAIL_LIMIT;
+}
+
+async function requireBasicAuth(req, res, next) {
   if (!BASIC_AUTH_USER || !BASIC_AUTH_PASSWORD) {
     return next();
   }
 
+  const source = req.ip || 'unknown';
   const [scheme, encoded] = (req.get('authorization') || '').split(' ');
+
   if (scheme === 'Basic' && encoded) {
     const decoded = Buffer.from(encoded, 'base64').toString();
     const separator = decoded.indexOf(':');
     const user = decoded.slice(0, separator);
     const password = decoded.slice(separator + 1);
     if (safeEqual(user, BASIC_AUTH_USER) && safeEqual(password, BASIC_AUTH_PASSWORD)) {
+      // 通ったら数え直す(打ち間違えたあとも尾を引かない)
+      authFailures.delete(source);
       return next();
     }
+  }
+
+  // 資格情報を送ってこなかった最初の1回は、ブラウザが必ず出す普通の流れ。
+  // 数えるのは「送ってきたが違った」場合だけにする
+  if (encoded && recordAuthFailure(source)) {
+    await new Promise((resolve) => setTimeout(resolve, AUTH_FAIL_DELAY_MS));
   }
 
   res.set('WWW-Authenticate', 'Basic realm="aging", charset="UTF-8"');
@@ -153,7 +219,38 @@ function isDevelopmentOrigin(candidate) {
 // ルート定義はrouterにまとめ、公開パス(BASE_PATH)配下へまとめてマウントする
 const router = express.Router();
 
+/*
+ * Renderはリバースプロキシの後ろでアプリを動かす。1段だけ信用して、
+ * X-Forwarded-For の先頭を接続元として扱う(認証の失敗回数を接続元ごとに
+ * 数えるため)。信用しないと全員が同じ接続元に見え、1人の総当たりで
+ * ブースまで締め出してしまう。
+ */
+app.set('trust proxy', 1);
+
 app.use(express.json());
+
+//NOTE: ここからRender公開用の共通ヘッダー
+/*
+ * どの応答にも付ける安全側のヘッダー。
+ *
+ * - Strict-Transport-Security: 以後このホストへはHTTPSでしか繋がせない
+ *   (Basic認証は毎回資格情報を送るため、平文で出す機会を作らない)
+ * - Referrer-Policy: 外部へ出ていく通信に参照元URLを載せない。
+ *   公開パスは推測困難であることが前提なので、外部に渡す機会を作らない
+ *   (最近のブラウザは既定でもパスまでは送らないが、明示しておく)
+ * - X-Content-Type-Options: 中身を見て型を推測させない
+ * - X-Frame-Options: 他所のページの枠に埋め込ませない
+ */
+app.use((req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  if (PUBLIC_ORIGIN) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
+//NOTE: ここまでRender公開用の共通ヘッダー
 
 //NOTE: ここからRender公開用のCORS設定。公開時はフロントとAPIを同一オリジンで配信するためCORSそのものが不要になる
 // 本番(PUBLIC_ORIGINあり)ではCORSヘッダーを一切付けない。ブラウザの
