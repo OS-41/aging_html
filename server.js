@@ -1000,6 +1000,24 @@ async function downloadResultImage(entryId, index, output, sequence) {
  * 受付情報のstatusに記録して握りつぶす。
  */
 async function processEntry(entry, origin) {
+  /*
+   * 開発モードではaging APIを呼ばない。撮った写真をそのまま結果にする。
+   *
+   * ユニットを1つも使わずに、撮影から閲覧までを実際の写真で通せる。
+   * 生成を待たないぶん、受付から表示までも速い。
+   * 本番では通らない道なので、加工前の写真が「未来のあなた」として
+   * 出ることはない(開発モードを終えるとこの受付は削除される)。
+   */
+  if (devMode) {
+    const shown = await keepOriginalAsResult(entry);
+    if (shown) {
+      deleteStoredFile(entry.sourceFileId);
+      entry.sourceFileId = null;
+      return;
+    }
+    // 控えられなかったときは、通常どおりAPIに投げる
+  }
+
   try {
     const srcFileUrl = `${origin}${BASE_PATH}/files/${entry.sourceFileId}`;
     entry.taskId = await startAgingTask(srcFileUrl, entry.sequence);
@@ -1040,11 +1058,6 @@ async function processEntry(entry, origin) {
     entry.status = 'error';
     entry.error = err.message;
     entry.errorCode = err.code || null;
-
-    // 開発モードのときは、加工できなかった写真を「元のまま」出せるようにする。
-    // APIのユニットが無い状態でも、撮影から閲覧までを実際の写真で通せる。
-    const shown = devMode ? await keepOriginalAsResult(entry) : false;
-
     if (entry.sourceFileId) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
@@ -1055,15 +1068,14 @@ async function processEntry(entry, origin) {
       sequence: entry.sequence,
       // 一覧には原因の頭だけ(describeAgingErrorの summary にあたる部分)。
       // コードやAPIの原文、例外の全文は詳細で見る
-      message: (err.message || '生成に失敗').split(' / ')[0]
-        + (shown ? '(開発モード: 元の写真を表示します)' : ''),
+      message: (err.message || '生成に失敗').split(' / ')[0],
       detail: { error: err.stack || String(err) }
     });
   }
 }
 
 /**
- * 加工できなかった受付を、元の写真のまま閲覧ブースに出せるようにする。
+ * 撮った写真を、加工せずそのまま閲覧ブースに出せるようにする。
  *
  * **開発モードのときだけ呼ぶ。** 本番でこれをやると、加工されていない写真が
  * 「未来のあなた」として出てしまう。
@@ -1089,7 +1101,7 @@ async function keepOriginalAsResult(entry) {
       level: 'warn',
       event: 'entry:fallback',
       sequence: entry.sequence,
-      message: '開発モードのため、加工前の写真をそのまま表示します'
+      message: '開発モードのため、aging APIに送らず撮影した写真をそのまま表示します'
     });
     return true;
   } catch (copyErr) {
