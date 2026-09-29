@@ -397,14 +397,16 @@
    * 人数を上下2段に振り分ける。
    *
    *  1人   … 段に分けず、画面いっぱいに1枚
-   *  2人以上… 上下2段。奇数のときは上段を1枚多くする(3人なら2+1)
+   *  2人   … 上下ではなく左右に1枚ずつ。画面は横長なので、縦に積むより
+   *           横に並べたほうが1枚を大きく出せる
+   *  3人以上… 上下2段。奇数のときは上段を1枚多くする(3人なら2+1)
    *
    * 1枚を大きく見せたいので、段を増やして小さくすることはしない。
    * @param {number} count
    * @returns {number[]} 段ごとの枚数
    */
   function rowsFor(count) {
-    if (count <= 1) return [Math.max(count, 0)];
+    if (count <= 2) return [Math.max(count, 0)];
     return [Math.ceil(count / 2), Math.floor(count / 2)];
   }
 
