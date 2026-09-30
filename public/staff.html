@@ -486,6 +486,42 @@
     color: #e6ad4b;
   }
 
+  /*
+   * 本日の受付終了まわり。
+   *
+   * ここを押すと来場者向けの2画面が両方とも掲示に変わるため、
+   * 他の操作と混ざらないよう線で区切り、締め切り中は赤で示す。
+   */
+  .service-block {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .limit-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .limit-field input {
+    width: 92px;
+    font-family: inherit;
+    font-size: 14px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 2px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    text-align: right;
+  }
+  .limit-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* 締め切っている間のボタン。押し忘れ・戻し忘れに気付けるよう色を変える */
+  #closeBtn.is-on {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
   .row-del {
     min-height: 30px;
     min-width: 0;
@@ -596,9 +632,34 @@
       <p class="now-showing" id="devNote" hidden>
         <b class="level-warn">開発モード中です。</b>撮影結果が1件も無いときは見本の画像で埋まり、撮影ブースには状態を選ぶ欄が出ます
         （撮影結果があるときの表示は本番と同じです）。
-        <b>加工に失敗した写真は、加工前のまま閲覧ブースに出ます</b>（終了時にまとめて削除されます）。
+        <b>撮影した写真はaging APIに送らず、加工せずそのまま閲覧ブースに出ます</b>
+        （ユニットを使いません。終了時にこの受付はまとめて削除されます）。
         <b>本番前に必ず終了してください。</b>
       </p>
+
+      <!--
+        本日の受付終了。押すと撮影ブース・閲覧ブースの両方が掲示に変わり、
+        それ以降の写真はサーバー側でも受け取らなくなる。
+        締め切り方は2つあり、どちらか一方でも成立していれば終了になる。
+      -->
+      <div class="service-block">
+        <p class="hint" style="margin-bottom:10px">
+          本日の受付を終えると、<b>撮影ブースは掲示だけ</b>になり、<b>閲覧ブースは待機画面のときだけ</b>掲示に変わります
+          （移動中の方の分は「結果画面に移行」で今までどおり出しきれます）。
+          上限を入れると、<b>入れた時点から</b>受け付けた人数を数え、その人数に達した時点で同じ掲示に変わります
+          （前日の試写や朝の試運転を数えてしまわないよう、入れ直すたびに0人から数え直します）。
+        </p>
+        <div class="control-row">
+          <button type="button" id="closeBtn">本日の受付を終了する</button>
+          <label class="limit-field">受付人数の上限
+            <input type="number" id="limitInput" min="1" max="10000" step="1" inputmode="numeric" placeholder="未設定">
+            人
+          </label>
+          <button type="button" class="quiet" id="limitApplyBtn">この人数で数え始める</button>
+          <button type="button" class="quiet" id="limitClearBtn">上限を解除</button>
+        </div>
+        <p class="now-showing" id="serviceNote">受付中です。人数上限は設定されていません。</p>
+      </div>
 
       <p class="now-showing">閲覧ブース: <b id="displayMode">—</b></p>
       <p class="now-showing">表示中: <b id="nowShowing">なし</b> <span id="displayUpdated"></span></p>
@@ -711,6 +772,11 @@
   const lockNote = document.getElementById('lockNote');
   const devBtn = document.getElementById('devBtn');
   const devNote = document.getElementById('devNote');
+  const closeBtn = document.getElementById('closeBtn');
+  const limitInput = document.getElementById('limitInput');
+  const limitApplyBtn = document.getElementById('limitApplyBtn');
+  const limitClearBtn = document.getElementById('limitClearBtn');
+  const serviceNote = document.getElementById('serviceNote');
   const reloadBtn = document.getElementById('reloadBtn');
   const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
@@ -1141,6 +1207,53 @@
     if (display.theme && document.activeElement !== themeSelect) {
       themeSelect.value = display.theme;
     }
+    renderService(display.service || null);
+  }
+
+  /**
+   * 本日の受付終了の状態を画面に反映する。
+   * @param {{closed: boolean, reason: string|null, limit: number|null,
+   *          counted: number, remaining: number|null, closed_at: string|null}|null} service
+   */
+  function renderService(service) {
+    if (!service) return;
+    serviceClosed = service.closed === true;
+    serviceLimit = service.limit;
+
+    closeBtn.textContent = serviceClosed ? '本日の受付を再開する' : '本日の受付を終了する';
+    closeBtn.classList.toggle('is-on', serviceClosed);
+    // 締め切っているあいだは結果画面の操作を止めない。すでに撮り終えた人が
+    // まだ会場にいるので、最後の組を出しきれる必要がある
+
+    // 打ち込んでいる最中に書き換えない(打った値が消えてしまうため)
+    if (document.activeElement !== limitInput) {
+      limitInput.value = service.limit === null ? '' : String(service.limit);
+    }
+    limitClearBtn.disabled = service.limit === null;
+
+    const countText = service.limit === null
+      ? '人数上限は設定されていません。'
+      : `上限 ${service.limit}人 ／ 受付 ${service.counted}人 ／ 残り ${service.remaining}人`
+        + (service.counting_since ? `（${timeText(service.counting_since)} から）` : '');
+
+    if (!serviceClosed) {
+      serviceNote.replaceChildren(`受付中です。${countText}`);
+      return;
+    }
+
+    const why = service.reason === 'limit'
+      ? `人数上限 ${service.limit}人に達しました。`
+      : '係員の操作で終了しました。';
+    const mark = document.createElement('b');
+    mark.className = 'level-error';
+    mark.textContent = '本日の受付は終了しています。';
+    serviceNote.replaceChildren(
+      mark,
+      ` ${why}撮影ブースは掲示だけになっています`
+      + `${service.closed_at ? `（${timeText(service.closed_at)}）` : ''}。`
+      + '移動中の方の分は「結果画面に移行」で出しきってください。'
+      + countText
+    );
   }
 
   async function refresh() {
@@ -1229,6 +1342,74 @@
     } finally {
       devBtn.disabled = false;
     }
+  });
+
+  // ---- 本日の受付終了 ----
+  //
+  // 押すと撮影ブースと閲覧ブースの両方が掲示に変わり、それ以降の写真は
+  // サーバー側でも受け取らなくなる。来場者の前で表示が変わる操作なので、
+  // 終了・再開・上限の設定はいずれも確認を挟む。
+  //
+  // 結果画面の操作(移行・待機)は締め切っても止めない。すでに撮り終えた人が
+  // まだ会場にいるため、最後の組を出しきれる必要がある。
+
+  // サーバーの値で毎回上書きする
+  let serviceClosed = false;
+  let serviceLimit = null;
+
+  /**
+   * 締め切りの設定を送り、返ってきた状態で画面を書き換える。
+   * @param {object} body - { closed?: boolean, limit?: number|null }
+   * @param {HTMLElement[]} buttons - 送っている間だけ押せなくするもの
+   */
+  async function postService(body, buttons) {
+    for (const button of buttons) button.disabled = true;
+    try {
+      renderDisplay(await callApi('/api/service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }));
+      await refresh();
+    } catch (err) {
+      alert(`変更できませんでした。${err.message}`);
+    } finally {
+      for (const button of buttons) button.disabled = false;
+    }
+  }
+
+  closeBtn.addEventListener('click', () => {
+    const question = serviceClosed
+      ? '本日の受付を再開します。\n\n・撮影ブースと閲覧ブースの掲示が消えます\n・撮影ブースは「カメラを開始」からやり直しになります'
+        + (serviceLimit !== null ? `\n・人数上限（${serviceLimit}人）に達していた場合は、いまから0人で数え直します` : '')
+        + '\n\nよろしいですか?'
+      : '本日の受付を終了します。\n\n・撮影ブースは掲示だけになり、カメラが止まります（これ以降の写真は受け取りません）\n'
+        + '・閲覧ブースは待機画面のときだけ掲示に変わります\n'
+        + '・「結果画面に移行」はそのまま使えます。移動中の方の分は、今までどおり出しきってください\n\n'
+        + '来場者が並んでいる場合は、先に案内してから押してください。よろしいですか?';
+    if (!confirm(question)) return;
+    postService({ closed: !serviceClosed }, [closeBtn]);
+  });
+
+  limitApplyBtn.addEventListener('click', () => {
+    const wanted = Number(limitInput.value);
+    if (!Number.isInteger(wanted) || wanted < 1 || wanted > 10000) {
+      alert('受付人数の上限は 1〜10000 の整数で入れてください');
+      limitInput.focus();
+      return;
+    }
+    if (!confirm(
+      `受付人数の上限を ${wanted}人にします。\n\n`
+      + '・いまから0人で数え直します（これまでの受付は数に入りません）\n'
+      + `・${wanted}人を受け付けた時点で、撮影ブースと閲覧ブースの両方に「本日は終了しました」と出ます\n\n`
+      + 'よろしいですか?'
+    )) return;
+    postService({ limit: wanted }, [limitApplyBtn, limitClearBtn]);
+  });
+
+  limitClearBtn.addEventListener('click', () => {
+    if (!confirm('人数上限を解除します。\n以後は人数で締め切りません（「本日の受付を終了する」は使えます）。\nよろしいですか?')) return;
+    postService({ limit: null }, [limitApplyBtn, limitClearBtn]);
   });
 
   // 見本で埋める人数。人数ごとの並びを確かめるための欄(開発モード中だけ出る)

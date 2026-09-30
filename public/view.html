@@ -80,6 +80,46 @@
     outline-offset: -3px;
   }
 
+  /*
+   * 本日の受付を終えたときの掲示。
+   *
+   * 閲覧ブースは遠くから見る画面なので、待機演出の上に大きく重ねる。
+   * 結果の区画は隠す(締め切ったあとに誰かの写真が残っていると、
+   * まだ続いていると思われてしまうため)。
+   */
+  .closed-notice {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2vh;
+    text-align: center;
+  }
+  .closed-title {
+    margin: 0;
+    /* 画面の端まで来ないよう、幅いっぱいではなく少し内側に収める */
+    max-width: 92%;
+    font-size: clamp(34px, 6.2vw, 96px);
+    font-weight: 700;
+    line-height: 1.2;
+    text-wrap: balance;
+    color: #ffffff;
+    text-shadow: 0 3px 10px rgba(0, 0, 0, 0.75);
+  }
+  .closed-lead {
+    margin: 0;
+    max-width: 80%;
+    font-size: clamp(20px, 2.8vw, 38px);
+    line-height: 1.6;
+    text-wrap: balance;
+    color: #ffffff;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.75);
+  }
+  /* 掲示を出している間は結果の区画を出さない */
+  body.is-closed .slots { display: none !important; }
+
   /* 開発モードである旨。会場で出したままにしないための目印 */
   .dev-banner {
     position: fixed;
@@ -366,6 +406,15 @@
 
     <div class="slots" id="slots"></div>
 
+    <!--
+      本日の受付を終えたときだけ出る掲示。係員画面の「本日の受付を終了」か、
+      決めておいた人数に達したときに、サーバーからの状態を見て出る。
+    -->
+    <div class="closed-notice" id="closedNotice" hidden>
+      <p class="closed-title">本日の展示は終了しました</p>
+      <p class="closed-lead" id="closedLead">ご来場いただきありがとうございました。</p>
+    </div>
+
     <div class="staff-bar">
       <span>閲覧ブース</span>
       <span>最終更新 <span class="count" id="updatedAt">—</span></span>
@@ -379,6 +428,8 @@
 <script>
   const slotsEl = document.getElementById('slots');
   const devBanner = document.getElementById('devBanner');
+  const closedNotice = document.getElementById('closedNotice');
+  const closedLead = document.getElementById('closedLead');
   const subtitle = document.getElementById('subtitle');
   const updatedAtEl = document.getElementById('updatedAt');
 
@@ -549,9 +600,12 @@
       slotsEl.replaceChildren();
     }
 
-    subtitle.textContent = showingResults
-      ? '画面の番号をお探しください'
-      : '次のご案内までしばらくお待ちください';
+    // 締め切りの掲示を出している間は、その案内を残す
+    if (!showingClosedNotice) {
+      subtitle.textContent = showingResults
+        ? '画面の番号をお探しください'
+        : '次のご案内までしばらくお待ちください';
+    }
     // 待機中は背景の演出をはっきり見せ、結果を出している間は控えめにする
     document.getElementById('ocean').classList.toggle('is-dimmed', showingResults);
 
@@ -560,11 +614,60 @@
       : '—';
   }
 
+  /*
+   * ---- 本日の受付終了 ----
+   *
+   * 係員画面の「本日の受付を終了」か、決めておいた人数に達したときに、
+   * サーバーが締め切りの状態を返してくる。
+   *
+   * **掲示を出すのは待機画面のときだけ。** 締め切ったあとも、すでに撮り終えて
+   * 移動中の人が残っている。その最後の組を係員が出しきれるよう、結果画面に
+   * 移している間は今までどおり写真を並べる(玉手箱の演出もそのまま出す)。
+   * 出し終えて待機画面に戻した時点で、掲示に変わる。
+   *
+   * 撮影ブースは締め切った時点ですぐ止まるので、これ以上人は増えない。
+   */
+
+  // 本日の受付を終えているか。サーバーの値で毎回上書きする
+  let serviceClosed = false;
+  // いま掲示を出しているか(締め切っていて、かつ待機画面のとき)
+  let showingClosedNotice = false;
+
+  /**
+   * 締め切りの状態を画面に反映する。
+   * @param {object} display - /api/display の応答
+   */
+  function applyServiceClosed(display) {
+    const service = display.service || null;
+    serviceClosed = service?.closed === true;
+    // 結果を出している間は掲示を出さない(最後の組を出しきるため)
+    const show = serviceClosed && display.mode !== 'results';
+    if (show === showingClosedNotice) return;
+    showingClosedNotice = show;
+
+    document.body.classList.toggle('is-closed', show);
+    closedNotice.hidden = !show;
+
+    if (show) {
+      closedLead.textContent = service.reason === 'limit'
+        ? '本日お受けできる人数に達しました。ご来場いただきありがとうございました。'
+        : 'ご来場いただきありがとうございました。';
+      subtitle.textContent = '本日の受付は終了しました';
+      ocean.classList.remove('is-dimmed');
+      logEvent({ level: 'warn', event: 'service:closed', message: '本日の受付終了の掲示を表示' });
+    } else {
+      // 掲示を下げたら、いまの表示内容で組み直す
+      rendered = false;
+      logEvent({ event: 'service:open', message: '本日の受付終了の掲示を解除' });
+    }
+  }
+
   async function poll() {
     try {
       const display = await callApi('/api/display');
       // 待機演出の絵柄は表示内容とは独立に切り替わる
       applyOceanTheme(display.theme);
+      applyServiceClosed(display);
 
       // 内容が変わったときだけ描き直す(画像の再読み込みを避ける)。
       // 初回は係員がまだ一度も更新していなくても、空きスロットを出しておく。
