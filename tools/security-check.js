@@ -188,6 +188,39 @@ function safeJson(text) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+/*
+ * ---- 前段(CDN)が返す403の扱い ----
+ *
+ * RenderのURLはCDN(Cloudflare)の後ろにある。CDNは怪しい形の要求を、
+ * こちらに届く前に403で弾くことがある(__proto__ を含むパス、経路を抜ける形の
+ * ファイル名など)。どこまで弾くかはCDN側の設定しだいで、日によっても変わる。
+ *
+ * そのため403は、その確認が「何を見ようとしていたか」で意味が変わる。
+ *
+ *  - 断ってほしかったもの → 断られているので OK(誰が断ったかだけ書き添える)
+ *  - 通ってほしかったもの → こちらの作りを確かめられていないので 要確認
+ *
+ * 403を一律で失敗にすると、直しようのないものが毎回「危険」に並んで、
+ * 本当に見るべきものが埋もれる。
+ */
+const CDN_BLOCKED = 403;
+
+/** 断ってほしかった確認。403は前段が断った印として通す。 */
+function expectReject(name, status, allowed, note = '') {
+  if (status === CDN_BLOCKED) return ok(name, `前段(CDN)が拒否${note ? ` / ${note}` : ''}`);
+  if (allowed.includes(status)) return ok(name, `${status}${note ? ` / ${note}` : ''}`);
+  return bad(name, `${status} 期待${allowed.join('・')}${note ? ` / ${note}` : ''}`);
+}
+
+/** 通ってほしかった確認。403だと確かめられていないので要確認にする。 */
+function expectPass(name, status, allowed, note = '') {
+  if (status === CDN_BLOCKED) {
+    return hmm(`${name}（確かめられず）`, `前段(CDN)が弾いたため、こちらの作りは未確認${note ? ` / ${note}` : ''}`);
+  }
+  if (allowed.includes(status)) return ok(name, `${note || status}`);
+  return bad(name, `${status} 期待${allowed.join('・')}${note ? ` / ${note}` : ''}`);
+}
+
 /**
  * 生のhttp/httpsで1回取る。
  * Nodeのfetch(undici)は304を受け取っても控えた本文を200として見せるため、
@@ -371,15 +404,23 @@ async function run() {
     ];
     for (const [label, bytes, type, expect] of cases) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(bytes, { type }) });
-      r.status === expect ? ok(`受け口が断る (${label})`, `${r.status}`) : bad(`受け口が断らない (${label})`, `${r.status} 期待${expect}`);
+      expectReject(`受け口が断る (${label})`, r.status, [expect]);
     }
 
-    // ファイル名に細工
-    for (const name of ['../../../evil.jpg', 'a\u0000.jpg', '<img src=x onerror=alert(1)>.jpg', 'A'.repeat(300) + '.jpg']) {
+    /*
+     * ファイル名に細工。
+     * 403 は、前段のCDNが「経路を抜けようとする形」「スクリプトに見える形」を
+     * こちらに届く前に弾いた印。受け取っていない点では同じなので通す。
+     */
+    const FILENAMES = {
+      '../../../evil.jpg': '経路を抜ける形',
+      'a\u0000.jpg': 'NULバイト入り',
+      '<img src=x onerror=alert(1)>.jpg': 'スクリプトに見える形',
+      ['A'.repeat(300) + '.jpg']: '300文字'
+    };
+    for (const [name, label] of Object.entries(FILENAMES)) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG, { name }) });
-      [201, 400].includes(r.status)
-        ? ok('細工したファイル名を受けても壊れない', `${r.status}`)
-        : bad('細工したファイル名で想定外', `${r.status}`);
+      expectReject(`細工したファイル名を受けても壊れない (${label})`, r.status, [201, 400]);
     }
 
     // originの偽装(外部APIに任意のURLを取りに行かせられないか)
@@ -391,9 +432,7 @@ async function run() {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG, { origin }) });
       // PUBLIC_ORIGIN が設定されていれば申告は無視されるので201でよい。
       // 設定されていない場合は400で断ること
-      [201, 400].includes(r.status)
-        ? ok('originの偽装で壊れない', `${origin.slice(0, 36)} → ${r.status}`)
-        : bad('originの偽装で想定外', `${origin} → ${r.status}`);
+      expectPass('originの偽装で壊れない', r.status, [201, 400], `${origin.slice(0, 36)} → ${r.status}`);
     }
   } else {
     hmm('画像の受け口の確認を飛ばした', '開発モードに入れてから流し直してください');
@@ -412,7 +451,7 @@ async function run() {
     ];
     for (const [label, body, type, expect] of cases) {
       const r = await req('/api/display/updates', { method: 'POST', headers: { 'Content-Type': type }, body });
-      expect.includes(r.status) ? ok(`崩した本文を断る (${label})`, `${r.status}`) : bad(`崩した本文で想定外 (${label})`, `${r.status} 期待${expect}`);
+      expectReject(`崩した本文を断る (${label})`, r.status, expect);
     }
 
     // プロトタイプ汚染
@@ -760,9 +799,7 @@ async function run() {
         headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
         body: gz
       });
-      [400, 413, 415].includes(r.status)
-        ? ok('圧縮爆弾を断る', `${(gz.length / 1024).toFixed(0)}KB が展開後60MB → ${r.status}`)
-        : bad('圧縮爆弾が通ってしまう', `${r.status}`);
+      expectReject('圧縮爆弾を断る', r.status, [400, 413, 415], `${(gz.length / 1024).toFixed(0)}KB が展開後60MB`);
       const alive = await req('/api/display');
       alive.status === 200 ? ok('圧縮爆弾のあとも応答する') : bad('圧縮爆弾でサーバーが応答しない', `${alive.status}`);
     }
