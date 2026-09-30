@@ -1189,24 +1189,51 @@ async function processEntry(entry, origin) {
   // ここは try の外なので、投げれば呼び出し元(受け口)の外へ出る。
   // keepOriginalAsResult と deleteStoredFile は自分で失敗を処理するが、
   // 将来ここに手を入れたときのために、この段も囲っておく
-  try {
-    if (devMode) {
-      const shown = await keepOriginalAsResult(entry);
-      if (shown) {
-        deleteStoredFile(entry.sourceFileId);
-        entry.sourceFileId = null;
-        return;
-      }
-      // 控えられなかったときは、通常どおりAPIに投げる
+  if (devMode) {
+    /*
+     * **開発モードでは、何があってもaging APIを呼ばない。**
+     *
+     * 以前はここで控えに失敗したとき「通常どおりAPIに投げる」ようにして
+     * いたが、それだと開発モードの意味が「たいていユニットを使わない」に
+     * なってしまう。ユニットを使わずに通しで確かめられることがこのモードの
+     * 唯一の存在理由なので、控えられなければ受付を失敗として終える。
+     *
+     * 失敗するのはディスクが埋まったときなど限られた場合だが、
+     * 「限られた場合には課金される」作りにしておくと、いざそれが起きた
+     * ときに気づけないまま枠を減らすことになる。
+     */
+    let shown = false;
+    try {
+      shown = await keepOriginalAsResult(entry);
+    } catch (devErr) {
+      addLog({
+        level: 'error',
+        event: 'entry:fallback',
+        sequence: entry.sequence,
+        message: `開発モードの控えに失敗: ${devErr.message}`,
+        detail: { error: devErr.stack || String(devErr) }
+      });
     }
-  } catch (devErr) {
+
+    if (shown) {
+      deleteStoredFile(entry.sourceFileId);
+      entry.sourceFileId = null;
+      return;
+    }
+
+    entry.status = 'error';
+    entry.error = '開発モードのため、撮影した写真をそのまま出そうとしましたが控えられませんでした';
+    if (entry.sourceFileId) {
+      deleteStoredFile(entry.sourceFileId);
+      entry.sourceFileId = null;
+    }
     addLog({
       level: 'error',
-      event: 'entry:fallback',
+      event: 'entry:error',
       sequence: entry.sequence,
-      message: `開発モードの控えに失敗: ${devErr.message}`,
-      detail: { error: devErr.stack || String(devErr) }
+      message: '開発モードのため、aging APIには送らずに失敗として終えました'
     });
+    return;
   }
 
   try {
@@ -1563,10 +1590,18 @@ router.post('/api/service', requireBasicAuth, (req, res) => {
   if (hasClosed && typeof body.closed !== 'boolean') {
     return res.status(400).json({ error: 'closed には true か false を指定してください' });
   }
+  /*
+   * 数として受け取れるかではなく、**数で送られてきたか**を見る。
+   *
+   * Number() に通すだけだと true が 1 に、[5] が 5 に、"0x10" が 16 になる。
+   * とくに true → 1 は、送る側の取り違え1つで「1人で本日の受付終了」に
+   * なってしまい、しかも 200 が返るので気づけない。
+   * 上限は展示そのものを止める値なので、曖昧な受け取り方をしない。
+   */
   if (hasLimit && body.limit !== null) {
-    const wanted = Number(body.limit);
-    if (!Number.isInteger(wanted) || wanted < 1 || wanted > MAX_SERVICE_LIMIT) {
-      return res.status(400).json({ error: `limit は 1〜${MAX_SERVICE_LIMIT} の整数か null で指定してください` });
+    const wanted = body.limit;
+    if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_SERVICE_LIMIT) {
+      return res.status(400).json({ error: `limit は 1〜${MAX_SERVICE_LIMIT} の整数(数値)か null で指定してください` });
     }
   }
 
@@ -1646,8 +1681,12 @@ router.post('/api/dev', requireBasicAuth, (req, res) => {
   }
 
   // 人数ごとの並びを確かめられるよう、見本の枚数を選べる
-  const wanted = Number(req.body?.placeholders);
-  if (Number.isInteger(wanted)) {
+  // 上限と同じ理由で、数で送られてきたときだけ受ける(true が 1 にならないように)
+  const wanted = req.body?.placeholders;
+  if (wanted !== undefined && wanted !== null) {
+    if (typeof wanted !== 'number' || !Number.isInteger(wanted)) {
+      return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} の整数(数値)で指定してください` });
+    }
     if (wanted < 1 || wanted > DISPLAY_SLOT_COUNT) {
       return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} で指定してください` });
     }
@@ -1830,7 +1869,12 @@ function toPublicLog(log) {
 }
 
 router.get('/api/logs', requireBasicAuth, revalidate, (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, MAX_LOG_ENTRIES);
+  // クエリは必ず文字列で来るので数に直す。負の数や桁違いはここで丸める
+  // (負のまま slice に渡すと、新しい順のはずが末尾を削る動きになる)
+  const asked = Number(req.query.limit);
+  const limit = Number.isFinite(asked) && asked > 0
+    ? Math.min(Math.floor(asked), MAX_LOG_ENTRIES)
+    : 100;
   res.json({ logs: [...logStore].reverse().slice(0, limit).map(toPublicLog) });
 });
 

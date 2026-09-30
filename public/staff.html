@@ -1316,9 +1316,9 @@
     let statusData;
     try {
       [data, display, logData, statusData] = await Promise.all([
-        callApi('/api/entries'),
-        callApi('/api/display'),
-        callApi('/api/logs?limit=200'),
+        callApi('/api/entries', { revalidate: true }),
+        callApi('/api/display', { revalidate: true }),
+        callApi('/api/logs?limit=200', { revalidate: true }),
         callApi('/api/status')
       ]);
     } catch (err) {

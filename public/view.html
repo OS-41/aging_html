@@ -671,7 +671,7 @@
 
   async function poll() {
     try {
-      const display = await callApi('/api/display');
+      const display = await callApi('/api/display', { revalidate: true });
       // 待機演出の絵柄は表示内容とは独立に切り替わる
       applyOceanTheme(display.theme);
       applyServiceClosed(display);

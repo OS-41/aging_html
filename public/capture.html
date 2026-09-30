@@ -571,7 +571,7 @@
   async function syncDisplay() {
     let display;
     try {
-      display = await callApi('/api/display');
+      display = await callApi('/api/display', { revalidate: true });
     } catch (err) {
       // 取得できなければ現在の状態のまま(絵柄も開発モードも変えない)
       return;
