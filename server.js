@@ -224,6 +224,26 @@ function isDevelopmentOrigin(candidate) {
 const router = express.Router();
 
 /*
+ * 中身が変わっていなければ、本文を送らずに304で返す。
+ *
+ * 3つの画面は3〜5秒ごとに同じ場所を見に来る。表示が変わっていない間も
+ * 毎回まるごと送っていると、一覧が育つほど通信量が増えていく
+ * (受付300件で1回120KB。3秒ごとなら140MB/時)。
+ *
+ * Expressはres.jsonにETagを付けるので、あとは「毎回必ず確かめてから使う」
+ * と伝えれば、変わっていない回はブラウザ側のif-none-matchで304になり、
+ * 本文が流れない。no-store ではなく no-cache であることが要点で、
+ * no-store だと確かめ直す材料ごと捨ててしまい毎回まるごと送ることになる。
+ *
+ * Renderの送信量はワークスペースごとの月単位で、使い切るとサービスが
+ * 止まる。展示中に止まらないよう、出ていく量そのものを減らしておく。
+ */
+function revalidate(req, res, next) {
+  res.setHeader('Cache-Control', 'no-cache, private');
+  next();
+}
+
+/*
  * Renderはリバースプロキシの後ろでアプリを動かす。1段だけ信用して、
  * X-Forwarded-For の先頭を接続元として扱う(認証の失敗回数を接続元ごとに
  * 数えるため)。信用しないと全員が同じ接続元に見え、1人の総当たりで
@@ -898,15 +918,39 @@ const upload = multer({
  * 保存されたファイルの先頭がJPEGのマジックバイト(FF D8 FF)かを検証する。
  * Content-Typeは詐称できるため、実体が画像であることを確認して
  * HTML等の別形式のコンテンツをホストさせられるのを防ぐ。
+ *
+ * 読めなかった場合は「JPEGではない」として扱う。ここで例外を投げると
+ * 受け口の非同期処理の外へ出てしまい、プロセスごと落ちる道になる。
  */
 function isJpegFile(filePath) {
-  const fd = fs.openSync(filePath, 'r');
+  let fd;
   try {
+    fd = fs.openSync(filePath, 'r');
     const header = Buffer.alloc(3);
     const bytesRead = fs.readSync(fd, header, 0, 3, 0);
     return bytesRead === 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  } catch (err) {
+    addLog({ level: 'warn', event: 'file:verify', message: `受け取った画像を確認できません: ${err.message}` });
+    return false;
   } finally {
-    fs.closeSync(fd);
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * 受け取ったばかりの一時ファイルを消す。
+ *
+ * 既に無い場合も、消せない場合も、そのまま進む。保持期間の掃除と
+ * 重なって先に消えていることがあり、そこで例外を投げると受け口の
+ * 非同期処理の外へ出てプロセスごと落ちる道になる。
+ */
+function discardUpload(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      addLog({ level: 'warn', event: 'file:delete', message: `受け取った画像を削除できません: ${err.message}` });
+    }
   }
 }
 
@@ -1142,14 +1186,27 @@ async function processEntry(entry, origin) {
    * 本番では通らない道なので、加工前の写真が「未来のあなた」として
    * 出ることはない(開発モードを終えるとこの受付は削除される)。
    */
-  if (devMode) {
-    const shown = await keepOriginalAsResult(entry);
-    if (shown) {
-      deleteStoredFile(entry.sourceFileId);
-      entry.sourceFileId = null;
-      return;
+  // ここは try の外なので、投げれば呼び出し元(受け口)の外へ出る。
+  // keepOriginalAsResult と deleteStoredFile は自分で失敗を処理するが、
+  // 将来ここに手を入れたときのために、この段も囲っておく
+  try {
+    if (devMode) {
+      const shown = await keepOriginalAsResult(entry);
+      if (shown) {
+        deleteStoredFile(entry.sourceFileId);
+        entry.sourceFileId = null;
+        return;
+      }
+      // 控えられなかったときは、通常どおりAPIに投げる
     }
-    // 控えられなかったときは、通常どおりAPIに投げる
+  } catch (devErr) {
+    addLog({
+      level: 'error',
+      event: 'entry:fallback',
+      sequence: entry.sequence,
+      message: `開発モードの控えに失敗: ${devErr.message}`,
+      detail: { error: devErr.stack || String(devErr) }
+    });
   }
 
   try {
@@ -1293,22 +1350,22 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
      * 掲示ではなく撮り直しの案内を出してしまうため、ここが先。
      */
     if (serviceIsClosed()) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       addLog({ level: 'warn', event: 'entry:closed', status: 409, message: '本日の受付終了後に写真が届いたため受け取りませんでした' });
       return res.status(409).json({ error: '本日の受付は終了しました', service: serviceState() });
     }
     if (!isJpegFile(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
     }
 
     const origin = resolvePublicOrigin(req.body?.origin);
     if (!origin) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(400).json({ error: '許可されていないoriginです' });
     }
     if (entryStore.size >= MAX_ENTRIES) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(507).json({ error: '受付の上限に達しています' });
     }
     const capturedAtMs = Date.now();
@@ -1359,8 +1416,20 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       }
     }
 
-    // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める
-    processEntry(entry, origin);
+    // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める。
+    // 待たない代わりに、失敗の行き先をここで必ず受けておく
+    // (受けないと、拾われなかったPromiseの失敗としてプロセスごと落ちる)
+    processEntry(entry, origin).catch((err) => {
+      entry.status = 'error';
+      entry.error = err.message;
+      addLog({
+        level: 'error',
+        event: 'entry:error',
+        sequence: entry.sequence,
+        message: (err.message || '生成に失敗').split(' / ')[0],
+        detail: { error: err.stack || String(err) }
+      });
+    });
 
     res.status(201).json({
       entry_id: entry.id,
@@ -1374,7 +1443,7 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
  * GET /api/entries
  * 受付の一覧を撮影時刻の古い順に返す(閲覧ブースの一覧・係員の確認用)。
  */
-router.get('/api/entries', requireBasicAuth, (req, res) => {
+router.get('/api/entries', requireBasicAuth, revalidate, (req, res) => {
   const entries = entriesInOrder().map(toPublicEntry);
   res.json({
     entries,
@@ -1387,7 +1456,7 @@ router.get('/api/entries', requireBasicAuth, (req, res) => {
  * GET /api/display
  * 閲覧ブースに映している内容。職員が入れ替えるまで変わらない。
  */
-router.get('/api/display', requireBasicAuth, (req, res) => {
+router.get('/api/display', requireBasicAuth, revalidate, (req, res) => {
   res.json(currentDisplay());
 });
 
@@ -1742,10 +1811,41 @@ router.get('/api/status', requireBasicAuth, (req, res) => {
 /**
  * GET /api/logs
  * 処理履歴(サーバー・クライアント双方)を新しい順に返す。
+ *
+ * **詳細(where/error/request/response)はここでは返さない。**
+ * 係員画面はこれを3秒ごとに取りに来る。詳細は1件あたり最大4000文字×3項目
+ * あるため、全部載せると1回の応答が数MBになり、それを1時間に1200回
+ * 繰り返すことになる(実測でGB/時の桁)。Renderの送信量はワークスペース
+ * ごとの月単位で、使い切るとサービスが止まるため、ここで通信量が
+ * 増えるほど展示そのものが危うくなる。しかも詳細が大きくなるのは
+ * 異常が続いているときなので、いちばん止まってほしくないときに
+ * いちばん速く使い切る作りになってしまう。
+ *
+ * 代わりに has_detail だけを返し、実際の中身は開いたときに
+ * GET /api/logs/:id で1件だけ取りに来てもらう。
  */
-router.get('/api/logs', requireBasicAuth, (req, res) => {
+function toPublicLog(log) {
+  const { detail, ...rest } = log;
+  return { ...rest, has_detail: detail !== null && detail !== undefined };
+}
+
+router.get('/api/logs', requireBasicAuth, revalidate, (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, MAX_LOG_ENTRIES);
-  res.json({ logs: [...logStore].reverse().slice(0, limit) });
+  res.json({ logs: [...logStore].reverse().slice(0, limit).map(toPublicLog) });
+});
+
+/**
+ * GET /api/logs/:id
+ * 1件の処理履歴を、詳細つきで返す(係員が「内容」を押したとき)。
+ */
+router.get('/api/logs/:id', requireBasicAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const log = Number.isInteger(id) ? logStore.find((entry) => entry.id === id) : null;
+  if (!log) {
+    // 古いものは押すまでに流れていることがある。係員画面はこれを見て案内を出す
+    return res.status(404).json({ error: 'その記録はもう残っていません' });
+  }
+  res.json(log);
 });
 
 /**
@@ -1865,6 +1965,39 @@ router.use(requireBasicAuth, express.static(path.join(__dirname, 'public'), {
 
 app.use(BASE_PATH || '/', router);
 //NOTE: ここまでRender公開用の配信設定
+
+/*
+ * 想定していない例外で、プロセスごと落ちないようにする。
+ *
+ * Node 22は、拾われなかった例外と拾われなかったPromiseの失敗で
+ * プロセスを終了させる。ここでのそれは「Renderが新しいインスタンスを
+ * 立ち上げる」という意味になり、**保管していた受付と結果が全部消え、
+ * 受付番号も1番に戻る**。展示中にこれが起きるのがいちばん困る。
+ *
+ * ふつうのサーバーなら、状態が壊れている可能性があるので落として
+ * 入れ直すのが正しい。ここでそうしないのは、
+ *
+ *  - 落ちたときに失われるものが、来場者の写真そのものだから
+ *  - ここで起きうる例外は要求1件ぶんの処理の中の出来事(消そうとした
+ *    ファイルがもう無い、など)で、他の受付の状態を壊すものではないから
+ *  - 落ちれば「確実に全部消える」のに対し、続ければ「その1件だけが
+ *    失敗する」で済むから
+ *
+ * の3つによる。握りつぶすのではなく、処理履歴とホスティング側のログの
+ * 両方に必ず残すので、あとから追える。
+ */
+function survive(kind, err) {
+  addLog({
+    level: 'error',
+    event: 'server:survived',
+    echo: true,
+    message: `${kind}: ${err?.message || String(err)}（処理を続けます）`,
+    detail: { error: err?.stack || String(err) }
+  });
+}
+
+process.on('uncaughtException', (err) => survive('拾われなかった例外', err));
+process.on('unhandledRejection', (reason) => survive('拾われなかったPromiseの失敗', reason));
 
 // "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
