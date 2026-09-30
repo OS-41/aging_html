@@ -17,7 +17,7 @@ services:
   - type: web
     name: aging-demo
     runtime: node
-    plan: starter        # 無料プランは15分でスリープし、aging APIからの画像取得に失敗する
+    plan: starter        # 0.5 CPU / 512MB。無料プランは15分でスリープし、その間のaging APIからの画像取得に失敗する
     branch: main
     buildCommand: npm install
     startCommand: node server.js   # npm start と同じ(npm経由でない分こちらが確実)
