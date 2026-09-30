@@ -128,16 +128,40 @@ const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000; // 10分
 const AUTH_FAIL_DELAY_MS = 2000;
 const authFailures = new Map();
 
+/*
+ * 接続元ごとの数えかたに加えて、**全体でも数える。**
+ *
+ * 接続元ごとだけに頼ると、前段の作り次第で効かなくなる。実際、Renderの前には
+ * CDN(Cloudflare)が入っていて、こちらから見える接続元がそのCDNの出口に
+ * なるため、1人が叩いていても複数の接続元に散って、どの1つも上限に届かない。
+ * 実サーバーで25回続けて間違えても遅延が掛からなかったのはこれが理由。
+ *
+ * 前段の段数を推測して trust proxy を増やす手もあるが、読み違えると
+ * **利用者が自由に書ける値を接続元として扱うことになり、かえって危ない**
+ * (偽装で回避も、他人になすりつけることもできてしまう)。
+ * そこで、前段がどうであっても効く全体の数えかたを足す。
+ *
+ * **正しい資格情報はここを通らない**ので、全体で遅らせてもブースには
+ * 影響しない。遅くなるのは間違えた側だけ。
+ */
+const AUTH_FAIL_TOTAL_LIMIT = 40;
+let authFailTotal = 0;
+let authFailTotalAtMs = 0;
+
 setInterval(() => {
   const expiry = Date.now() - AUTH_FAIL_WINDOW_MS;
   for (const [key, record] of authFailures) {
     if (record.lastAtMs < expiry) authFailures.delete(key);
   }
+  if (authFailTotalAtMs && authFailTotalAtMs < expiry) {
+    authFailTotal = 0;
+    authFailTotalAtMs = 0;
+  }
 }, 60 * 1000).unref();
 
 /**
  * 認証の失敗を数える。遅らせる段階に入っていたら true を返す。
- * @param {string} source - 接続元
+ * @param {string} source - 接続元(前段の作りによっては皆同じ値になりうる)
  */
 function recordAuthFailure(source) {
   const now = Date.now();
@@ -148,6 +172,11 @@ function recordAuthFailure(source) {
   record.lastAtMs = now;
   authFailures.set(source, record);
 
+  // 全体の数。接続元が当てにならない場合でもここで止まる
+  if (now - authFailTotalAtMs > AUTH_FAIL_WINDOW_MS) authFailTotal = 0;
+  authFailTotal += 1;
+  authFailTotalAtMs = now;
+
   if (record.count === AUTH_FAIL_LIMIT) {
     addLog({
       level: 'error',
@@ -155,17 +184,24 @@ function recordAuthFailure(source) {
       status: 401,
       message: `${source} からの認証失敗が${record.count}回。以後この接続元への応答を遅らせます`
     });
+  } else if (authFailTotal === AUTH_FAIL_TOTAL_LIMIT) {
+    addLog({
+      level: 'error',
+      event: 'auth:throttled',
+      status: 401,
+      message: `10分間の認証失敗が全体で${authFailTotal}回。以後、間違えた応答を遅らせます(正しい資格情報はそのまま通ります)`
+    });
   } else if (record.count === 1 || record.count % 5 === 0) {
     // 履歴を埋めないよう、最初と5回ごとだけ残す
     addLog({
       level: 'warn',
       event: 'auth:failed',
       status: 401,
-      message: `${source} から認証に失敗(${record.count}回目)`
+      message: `${source} から認証に失敗(この接続元から${record.count}回目 / 全体で${authFailTotal}回目)`
     });
   }
 
-  return record.count >= AUTH_FAIL_LIMIT;
+  return record.count >= AUTH_FAIL_LIMIT || authFailTotal >= AUTH_FAIL_TOTAL_LIMIT;
 }
 
 async function requireBasicAuth(req, res, next) {
@@ -1879,7 +1915,16 @@ router.get('/api/status', requireBasicAuth, (req, res) => {
       started_at: new Date(SERVER_STARTED_AT_MS).toISOString(),
       uptime_ms: now - SERVER_STARTED_AT_MS,
       entries: entryStore.size,
-      logs: logStore.length
+      logs: logStore.length,
+      /*
+       * このサーバーから見た「要求の出どころ」。
+       * 前段(CDNなど)が入ると、ここが皆同じ値になったり、要求ごとに
+       * 散ったりする。認証の失敗を接続元ごとに数える仕組みが効いているか、
+       * ここを見れば分かる(散っていれば効かない)。
+       */
+      client_ip: req.ip || null,
+      forwarded_for: req.get('x-forwarded-for') || null,
+      auth_failures_10min: authFailTotal
     },
     aging_api: {
       last_status: agingApiHealth.lastStatus,

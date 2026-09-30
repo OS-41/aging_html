@@ -465,18 +465,26 @@ async function run() {
       r.status === expect ? ok(`値を検証する (${label})`, `${r.status}`) : bad(`値を検証していない (${label})`, `${r.status}`);
     }
 
-    // idの細工
+    /*
+     * idの細工。
+     *
+     * 403 は、前段のCDN(Renderの前にはCloudflareが入る)が __proto__ のような
+     * 見た目を先に弾いた印。こちらに届く前に断られているので、断っている点では
+     * 400/404 と同じ。手元(前段なし)では404、本番では403になる。
+     */
+    const REJECTED = [400, 403, 404];
+    const byWho = (status) => (status === 403 ? '前段(CDN)が拒否' : String(status));
     for (const id of ['__proto__', 'constructor', '../../etc/passwd', '%2e%2e%2f', 'a'.repeat(500)]) {
       const r = await req('/api/entries/' + encodeURIComponent(id));
-      [400, 404].includes(r.status) ? ok('受付idの細工を断る', `${r.status}`) : bad('受付idの細工で想定外', `${id} → ${r.status}`);
+      REJECTED.includes(r.status) ? ok('受付idの細工を断る', byWho(r.status)) : bad('受付idの細工で想定外', `${id} → ${r.status}`);
       const r2 = await req('/api/logs/' + encodeURIComponent(id));
-      [400, 404].includes(r2.status) ? ok('履歴idの細工を断る', `${r2.status}`) : bad('履歴idの細工で想定外', `${id} → ${r2.status}`);
+      REJECTED.includes(r2.status) ? ok('履歴idの細工を断る', byWho(r2.status)) : bad('履歴idの細工で想定外', `${id} → ${r2.status}`);
     }
 
     // 画像の添字
     for (const idx of ['-1', '1e9', '__proto__', 'constructor', '1.5']) {
       const r = await req(`/api/entries/00000000-0000-0000-0000-000000000000/images/${encodeURIComponent(idx)}`);
-      [400, 404].includes(r.status) ? ok('画像の添字の細工を断る', `${r.status}`) : bad('画像の添字の細工で想定外', `${idx} → ${r.status}`);
+      REJECTED.includes(r.status) ? ok('画像の添字の細工を断る', byWho(r.status)) : bad('画像の添字の細工で想定外', `${idx} → ${r.status}`);
     }
   }
 
@@ -547,17 +555,35 @@ async function run() {
   // ---- 12. 認証の総当たり ----
   section(12, '認証の総当たり');
   if (AUTH) {
-    doing('わざと25回間違えます。遅延が効くので12秒ほどかかります');
-    const started = Date.now();
-    for (let i = 0; i < 25; i++) {
+    // このサーバーから見た接続元。前段(CDN)が入ると皆同じ値になったり
+    // 要求ごとに散ったりする。散ると接続元ごとの数えかたが効かない
+    const before = await req('/api/status');
+    const seenIp = before.json?.server?.client_ip;
+    const xff = before.json?.server?.forwarded_for;
+    if (seenIp !== undefined) {
+      line(dim(`       サーバーから見た接続元: ${seenIp || '(不明)'}${xff ? `  X-Forwarded-For: ${xff}` : ''}`));
+    }
+
+    /*
+     * わざと間違え続けて、遅延が掛かり始めるまで何回かかるかを見る。
+     * 掛かった時点で止めるので、効いていれば短く済む
+     * (効いていない場合だけ上限まで叩いて、それから報告する)。
+     */
+    const MAX_TRIES = 50;
+    doing(`わざと間違え続けます。遅延が掛かった時点で止めます(最大${MAX_TRIES}回)`);
+    let slowAt = 0;
+    let tries = 0;
+    for (let i = 0; i < MAX_TRIES; i++) {
+      const t = Date.now();
       await req('/api/display', {
         auth: false, headers: { Authorization: 'Basic ' + Buffer.from(`${USER}:wrong${i}`).toString('base64') }
       });
+      tries = i + 1;
+      if (Date.now() - t > 1500) { slowAt = tries; break; }
     }
-    const spent = Date.now() - started;
-    spent > 4000
-      ? ok('失敗が続くと応答が遅くなる', `25回で${(spent / 1000).toFixed(1)}秒`)
-      : hmm('失敗が続いても遅くならない', `25回で${(spent / 1000).toFixed(1)}秒`);
+    slowAt
+      ? ok('失敗が続くと応答が遅くなる', `${slowAt}回目から遅延`)
+      : bad('失敗が続いても遅くならない', `${tries}回間違えても遅くならない — 総当たりを止められない`);
 
     const t0 = Date.now();
     const good = await req('/api/display');
@@ -812,9 +838,16 @@ async function run() {
       /Express|Node\.js|nginx|cannot GET/i.test(r.text)
         ? hmm('入口の応答で使っている道具が分かる', r.text.slice(0, 80))
         : ok('入口の応答から道具が分からない');
-      r.headers.get('server')
-        ? hmm('Serverヘッダーが出ている', r.headers.get('server'))
-        : ok('Serverヘッダーを出していない');
+      const server = r.headers.get('server');
+      if (!server) {
+        ok('Serverヘッダーを出していない');
+      } else if (/cloudflare|cloudfront|akamai|fastly|render/i.test(server)) {
+        // 前段のCDNが名乗っているもの。こちらのアプリの素性は出ていないので、
+        // 消せないし、消す必要もない
+        ok('Serverヘッダーは前段のもの', `${server}（アプリの素性は出ていない）`);
+      } else {
+        hmm('Serverヘッダーでアプリの素性が分かる', server);
+      }
     }
 
     // (n) 画面の守りの上乗せ(万一の持ち出しを止める)
