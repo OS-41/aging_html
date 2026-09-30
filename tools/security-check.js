@@ -490,6 +490,208 @@ async function run() {
       : ok('画面は外部から何も読み込まない');
   }
 
+  // ---- 16. 中身を知らない相手が最初にやること ----
+  //
+  // ここまでは「コードを読んで気づいた穴」を確かめてきた。ここからは逆に、
+  // 中身を何も知らない相手が、外から順に試していく手をなぞる。
+  {
+    const host = new URL(BASE).host;
+    const scheme = new URL(BASE).protocol;
+
+    // (a) 公開パスを探り当てられるか。
+    //     間違ったパスと正しいパスで応答が違うと、それが手がかりになる
+    const wrongPath = await req(`${scheme}//${host}/zzqq-not-a-real-path/api/display`, { raw: true, auth: false });
+    const rightPath = await req('/api/display', { auth: false });
+    if (AUTH) {
+      wrongPath.status === rightPath.status
+        ? ok('正しい公開パスと外れの応答が同じ', `どちらも${wrongPath.status}`)
+        : hmm('公開パスの当たり外れが応答で分かる',
+          `外れ${wrongPath.status} / 当たり${rightPath.status} — 総当たりの手がかりになる`);
+    }
+
+    // (b) 入口を教えてしまうファイルが置かれていないか
+    for (const path of ['/robots.txt', '/sitemap.xml', '/.well-known/security.txt', '/favicon.ico']) {
+      const r = await req(`${scheme}//${host}${path}`, { raw: true, auth: false });
+      r.status === 200 && new RegExp(BASE.split('/').pop()).test(r.text)
+        ? bad('公開パスが外から読めるファイルに書かれている', path)
+        : ok('入口を教えるファイルが無い', `${path} → ${r.status}`);
+    }
+
+    // (c) よくある置き忘れ
+    for (const path of ['/.env', '/.git/HEAD', '/config.json', '/backup.zip', '/admin', '/phpinfo.php', '/.DS_Store']) {
+      const r = await req(`${scheme}//${host}${path}`, { raw: true, auth: false });
+      r.status === 200
+        ? bad('置き忘れたファイルが読める', path)
+        : ok('置き忘れが無い', `${path} → ${r.status}`);
+    }
+
+    // (d) メソッドを変えて認証やCSRFの検査をすり抜けられないか。
+    //     0 は Node の fetch がそのメソッドを送れないもの(TRACEなど)、
+    //     400 は Node のHTTP解析が知らないメソッドとして弾いたもの。
+    //     どちらも「受け付けていない」なので、通った扱いにはしない
+    for (const method of ['PUT', 'PATCH', 'TRACE', 'PROPFIND', 'FOO']) {
+      const r = await req('/api/display/clear', { method });
+      [0, 400, 403, 404, 405, 501].includes(r.status)
+        ? ok(`知らないメソッドを受けない (${method})`, `${r.status || '送信できず'}`)
+        : bad(`知らないメソッドが通る (${method})`, `${r.status}`);
+    }
+
+    // TRACE で送った内容がそのまま返ってこないか(返ると資格情報を盗む足掛かりになる)
+    {
+      const net = require('net');
+      const u = new URL(BASE);
+      if (u.protocol === 'http:') {
+        const reflected = await new Promise((resolve) => {
+          const sock = net.connect(Number(u.port || 80), u.hostname, () => {
+            sock.write(`TRACE ${u.pathname}/api/display HTTP/1.1\r\nHost: ${u.host}\r\nX-Probe: reflect-me\r\n\r\n`);
+          });
+          let d = '';
+          sock.on('data', (c) => { d += c; });
+          sock.on('error', () => resolve(false));
+          setTimeout(() => { sock.destroy(); resolve(/reflect-me/.test(d)); }, 2000);
+        });
+        reflected ? bad('TRACEで送った内容が返ってくる') : ok('TRACEで送った内容は返らない');
+      }
+    }
+
+    // (e) メソッドを詐称するヘッダー。これが効くとCSRFの検査を飛び越えられる
+    //     (検査はGET/HEAD/OPTIONS以外にしか掛からないため)
+    for (const header of ['X-HTTP-Method-Override', 'X-Method-Override', 'X-HTTP-Method']) {
+      const before = (await req('/api/display')).json?.mode;
+      const r = await req('/api/display/clear', { method: 'GET', headers: { [header]: 'POST' } });
+      const after = (await req('/api/display')).json?.mode;
+      r.status === 404 && before === after
+        ? ok(`メソッドの詐称が効かない (${header})`)
+        : bad(`メソッドの詐称が効く (${header})`, `${r.status} mode ${before}→${after}`);
+    }
+
+    // (f) 経路の書き方を変えて認証を抜けられないか
+    for (const path of [
+      '//api/display', '/api//display', '/./api/display', '/api/./display',
+      '/API/DISPLAY', '/api/display/', '/api/display/.', '/api/display%20',
+      '/api/display;x=1', '/%61pi/display'
+    ]) {
+      const r = await req(path, { auth: false });
+      if (!AUTH) { ok('認証なし運用のため判定を飛ばす'); break; }
+      [401, 404].includes(r.status)
+        ? ok('経路の書き換えで認証を抜けられない', `${path} → ${r.status}`)
+        : bad('経路の書き換えで認証を抜けられる', `${path} → ${r.status}`);
+    }
+
+    // (g) 前段のプロキシを装うヘッダーで行き先を書き換えられないか
+    for (const [h, v] of [
+      ['X-Original-URL', '/api/display'], ['X-Rewrite-URL', '/api/display'],
+      ['X-Forwarded-Host', 'evil.example.com'], ['X-Forwarded-Proto', 'http'],
+      ['X-Forwarded-Prefix', '/evil'], ['X-Forwarded-Port', '1']
+    ]) {
+      const r = await req(`${scheme}//${host}/zzqq-not-a-real-path/`, { raw: true, auth: false, headers: { [h]: v } });
+      r.status === 200
+        ? bad('プロキシ用ヘッダーで認証を抜けられる', `${h}: ${v}`)
+        : ok('プロキシ用ヘッダーで行き先は変わらない', `${h} → ${r.status}`);
+    }
+
+    // (h) 圧縮爆弾。展開後の大きさで断らないとメモリを食い尽くされる
+    {
+      const zlib = require('zlib');
+      const huge = Buffer.from('{"enabled":true,"x":"' + 'a'.repeat(60 * 1024 * 1024) + '"}');
+      const gz = zlib.gzipSync(huge);
+      const r = await req('/api/display/updates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+        body: gz
+      });
+      [400, 413, 415].includes(r.status)
+        ? ok('圧縮爆弾を断る', `${(gz.length / 1024).toFixed(0)}KB が展開後60MB → ${r.status}`)
+        : bad('圧縮爆弾が通ってしまう', `${r.status}`);
+      const alive = await req('/api/display');
+      alive.status === 200 ? ok('圧縮爆弾のあとも応答する') : bad('圧縮爆弾でサーバーが応答しない', `${alive.status}`);
+    }
+
+    // (i) 長さの食い違い(要求の密輸)
+    for (const headers of [
+      { 'Content-Length': '5', 'Transfer-Encoding': 'chunked' },
+      { 'Content-Length': '5', 'Content-Length ': '6' }
+    ]) {
+      const r = await req('/api/display/updates', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: '{"enabled":true}'
+      });
+      [400, 403, 411, 413, 0].includes(r.status) || r.status === 200
+        ? ok('長さの食い違いで壊れない', `${r.status}`)
+        : hmm('長さの食い違いで想定外', `${r.status}`);
+    }
+
+    // (j) Rangeの細工。大きなファイルで増幅させられないか
+    {
+      const many = Array.from({ length: 300 }, (_, i) => `${i}-${i + 1}`).join(',');
+      const r = await req('/vendor/selfie_segmentation/selfie_segmentation_solution_simd_wasm_bin.wasm', {
+        headers: { Range: `bytes=${many}` }
+      });
+      [200, 206, 416].includes(r.status)
+        ? ok('Rangeの細工で壊れない', `${r.status} ${(r.text.length / 1024).toFixed(0)}KB`)
+        : hmm('Rangeの細工で想定外', `${r.status}`);
+    }
+
+    // (k) 開いたまま黙る接続(遅延攻撃)。展示中に一番効く止め方
+    {
+      const net = require('net');
+      const isTls = scheme === 'https:';
+      const port = new URL(BASE).port || (isTls ? 443 : 80);
+      const sockets = [];
+      const N = 80;
+      await new Promise((resolve) => {
+        let opened = 0;
+        for (let i = 0; i < N; i++) {
+          const lib = isTls ? require('tls') : net;
+          const sock = lib.connect(
+            isTls ? { host: new URL(BASE).hostname, port, servername: new URL(BASE).hostname } : { host: new URL(BASE).hostname, port },
+            () => {
+              // ヘッダーを送り切らずに黙る
+              sock.write(`GET ${new URL(BASE).pathname}/api/display HTTP/1.1\r\nHost: ${host}\r\n`);
+              if (++opened === N) resolve();
+            }
+          );
+          sock.on('error', () => { if (++opened === N) resolve(); });
+          sockets.push(sock);
+        }
+        setTimeout(resolve, 5000);
+      });
+      const during = await req('/api/display');
+      for (const sock of sockets) sock.destroy();
+      during.status === 200
+        ? ok('黙った接続を抱えたままでも応答する', `${N}本を保持中に200`)
+        : bad('黙った接続で応答できなくなる', `${N}本で ${during.status}`);
+    }
+
+    // (l) 飛ばし先を書き換えられないか
+    for (const path of ['/?next=//evil.example.com', '/api/display?redirect=//evil.example.com']) {
+      const r = await req(path, { redirect: 'manual' });
+      const loc = r.headers.get('location');
+      loc && /evil\.example\.com/.test(loc)
+        ? bad('外部へ飛ばせる', `${path} → ${loc}`)
+        : ok('外部へ飛ばせない', `${path} → ${r.status}`);
+    }
+
+    // (m) 入口の応答から中身が分かってしまわないか
+    {
+      const r = await req(`${scheme}//${host}/`, { raw: true, auth: false });
+      /Express|Node\.js|nginx|cannot GET/i.test(r.text)
+        ? hmm('入口の応答で使っている道具が分かる', r.text.slice(0, 80))
+        : ok('入口の応答から道具が分からない');
+      r.headers.get('server')
+        ? hmm('Serverヘッダーが出ている', r.headers.get('server'))
+        : ok('Serverヘッダーを出していない');
+    }
+
+    // (n) 画面の守りの上乗せ(万一の持ち出しを止める)
+    {
+      const r = await req('/capture.html');
+      const csp = r.headers.get('content-security-policy');
+      csp
+        ? ok('Content-Security-Policy がある', csp.slice(0, 70))
+        : hmm('Content-Security-Policy が無い', '万一の持ち出しを止める上乗せが無い');
+    }
+  }
+
   // ============================================================
   console.log(`\n${'='.repeat(60)}`);
   console.log(`確認できたこと: ${pass.length}件`);

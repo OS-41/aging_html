@@ -269,10 +269,40 @@ app.use(express.json());
  * - X-Content-Type-Options: 中身を見て型を推測させない
  * - X-Frame-Options: 他所のページの枠に埋め込ませない
  */
+/*
+ * 画面が読み込んでよい先を、ここに挙げたものだけに絞る(CSP)。
+ *
+ * いまのところ画面に危険な組み立て(innerHTML等)は無いが、これは
+ * 「万一それが入り込んだときに、外へ持ち出させない」ための上乗せ。
+ * connect-src を自分自身だけにしてあるので、仮に何かを差し込まれても
+ * 撮った写真や資格情報を他所へ送る先が無い。
+ *
+ * - 'unsafe-inline': 各画面は <script> と <style> を直接書いているため必要。
+ *   外部からの読み込み(script-src 'self')は塞がるので、持ち出しは止まる
+ * - blob: と data:: 撮影した写真をcanvasから取り出すのに使う
+ * - worker-src に blob:: MediaPipeが切り抜きを別スレッドで動かすため
+ * - frame-ancestors 'none': X-Frame-Options と同じことを新しい書き方でも
+ */
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "worker-src 'self' blob:",
+  "connect-src 'self' blob:",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'"
+].join('; ');
+
 app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', CSP);
   if (PUBLIC_ORIGIN) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
@@ -2008,6 +2038,25 @@ router.use(requireBasicAuth, express.static(path.join(__dirname, 'public'), {
 }));
 
 app.use(BASE_PATH || '/', router);
+
+/*
+ * どこを叩いても、資格情報が無ければ同じ401を返す。
+ *
+ * 公開パスは「推測困難であること」を頼りにしている。ところが、正しいパスは
+ * 認証を求めて401、外れたパスは404、と応答が違うと、**資格情報を一つも
+ * 持たない相手でも、応答の違いだけで公開パスを総当たりで探し当てられる。**
+ * 401が返った時点で「ここが入口だ」と分かってしまう。
+ *
+ * そこで、routerが受け取らなかった要求もこの中継を通し、資格情報が無ければ
+ * 401、あれば普通の404を返す。外から見ると、どのパスも区別なく401になる。
+ * 総当たりは処理履歴にも残り、続けば応答が遅くなる(requireBasicAuthと同じ)。
+ *
+ * ヘルスチェック(/healthz)はこれより前に登録してあるので影響を受けない。
+ * Expressの既定のエラー画面(Expressだと分かるHTML)もここで置き換わる。
+ */
+app.use(requireBasicAuth, (req, res) => {
+  res.status(404).json({ error: '見つかりません' });
+});
 //NOTE: ここまでRender公開用の配信設定
 
 /*
