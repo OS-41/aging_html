@@ -137,6 +137,54 @@
     }
   }
 
+  /*
+   * 本日の受付を終えたときの掲示。
+   *
+   * 来場者が並んでいる前で出るものなので、迷わせないよう画面の主役にする。
+   * カメラ映像・ボタン・番号はすべて隠し、この1枚だけを残す。係員向けの行は
+   * 残す(係員が状態を確かめ、必要なら再開できるようにするため)。
+   */
+  .closed-notice {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    background: var(--surface);
+    border: 3px solid var(--danger);
+    border-radius: 18px;
+    padding: 32px 28px;
+  }
+  .closed-title {
+    margin: 0;
+    font-size: clamp(30px, 5vw, 48px);
+    font-weight: 700;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+  .closed-lead {
+    margin: 0;
+    font-size: clamp(18px, 2.6vw, 24px);
+    line-height: 1.6;
+    text-wrap: balance;
+  }
+  .closed-note {
+    margin: 0;
+    color: var(--muted);
+    font-size: clamp(14px, 1.8vw, 17px);
+    line-height: 1.6;
+  }
+  /* 掲示を出している間は、撮る側の表示をすべて引っ込める */
+  body.is-closed .stage,
+  body.is-closed .actions,
+  body.is-closed .receipt,
+  body.is-closed .failure,
+  body.is-closed .privacy,
+  body.is-closed #status { display: none !important; }
+
   /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
   .dev-bar {
     margin-top: 0;
@@ -204,6 +252,16 @@
       <p class="receipt-label">あなたの番号</p>
       <p class="receipt-number" id="receiptNumber">—</p>
       <p class="receipt-note">この番号の順に呼ばれます。このまま次へお進みください。</p>
+    </div>
+
+    <!--
+      本日の受付を終えたときだけ出る掲示。係員画面の「本日の受付を終了」か、
+      決めておいた人数に達したときに、サーバーからの状態を見て出る。
+    -->
+    <div class="closed-notice" id="closedNotice" hidden>
+      <p class="closed-title">本日の撮影は終了しました</p>
+      <p class="closed-lead" id="closedLead">本日の受付は終了いたしました。ご来場ありがとうございました。</p>
+      <p class="closed-note">またの機会にぜひお越しください。ご不明な点は係員までお声がけください。</p>
     </div>
 
     <div class="actions">
@@ -295,6 +353,8 @@
   const devImageGroup = document.getElementById('devImageGroup');
   const devTechGroup = document.getElementById('devTechGroup');
   const devResetBtn = document.getElementById('devResetBtn');
+  const closedNotice = document.getElementById('closedNotice');
+  const closedLead = document.getElementById('closedLead');
 
   // 送信後、次の来場者のために自動で初期状態へ戻すまでの時間
   const AUTO_RESET_MS = 20000;
@@ -505,6 +565,7 @@
     }
 
     setDevMode(display.dev_mode === true);
+    setServiceClosed(display.service || null);
 
     if (backgroundMode !== 'sync') return;
     const theme = SYNC_FALLBACK[display.theme] || display.theme;
@@ -876,6 +937,48 @@
     setStatus(stream ? '正面を向いて「撮影する」を押してください' : '「カメラを開始」を押してください');
   }
 
+  // ---- 本日の受付終了 ----
+  //
+  // 係員画面の「本日の受付を終了」か、決めておいた人数に達したときに、
+  // サーバーが締め切りの状態を返してくる。撮る側の表示をすべて引っ込め、
+  // 掲示だけを残す。並んでいる来場者に、もう撮れないことを一目で伝えるため。
+  //
+  // 掲示を出している間はカメラも止める。映像は隠れていても、掴んだままだと
+  // 合成をまわし続けることになり、閉場までの時間ぶん端末を温め続けてしまう。
+
+  // 本日の受付を終えているか。サーバーの値で毎回上書きする
+  let serviceClosed = false;
+
+  /**
+   * 締め切りの状態を画面に反映する。
+   * @param {{closed: boolean, reason: string|null}|null} service
+   */
+  function setServiceClosed(service) {
+    const closed = service?.closed === true;
+    if (closed === serviceClosed) return;
+    serviceClosed = closed;
+
+    document.body.classList.toggle('is-closed', closed);
+    closedNotice.hidden = !closed;
+
+    if (closed) {
+      // 途中まで進んでいた人がいても、送れないまま残さない
+      clearTimeout(autoResetTimer);
+      capturedBlob = null;
+      setWorking(null);
+      stopCamera();
+      captureBtn.disabled = true;
+      closedLead.textContent = service.reason === 'limit'
+        ? '本日お受けできる人数に達しました。ご来場ありがとうございました。'
+        : '本日の受付は終了いたしました。ご来場ありがとうございました。';
+      logEvent({ level: 'warn', event: 'service:closed', message: '本日の受付終了の掲示を表示' });
+    } else {
+      // 再開したら、係員が「カメラを開始」を押すところからやり直す
+      resetToCamera();
+      logEvent({ event: 'service:open', message: '本日の受付終了の掲示を解除' });
+    }
+  }
+
   // ---- 開発モード ----
   // 係員画面で開発モードに入っている間だけ、表示する状態を選べるようにする。
   // aging APIのユニットが尽きている間でも、各状態の見た目を確認できる。
@@ -1152,6 +1255,15 @@
 
       result = await callApi('/api/entries', { method: 'POST', body: formData });
     } catch (err) {
+      /*
+       * 押した直後に締め切られた場合。5秒ごとの確認を待たずに掲示へ移す。
+       * 「送信に失敗しました。もう一度」と出してしまうと、もう受け付けない
+       * ことが伝わらず、来場者が撮り直しを繰り返すため。
+       */
+      if (err.payload?.service?.closed) {
+        setServiceClosed(err.payload.service);
+        return;
+      }
       logEvent({
         level: 'error',
         event: 'capture:send',

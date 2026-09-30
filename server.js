@@ -33,6 +33,7 @@
  *   GET    /api/display                       閲覧ブースに映している内容
  *   POST   /api/display/theme                 待機演出の絵柄を切り替える(係員用)
  *   POST   /api/display/updates               閲覧ブースの入れ替えを許すか(係員用)
+ *   POST   /api/service                       本日の受付を終える/再開する・人数上限(係員用)
  *   POST   /api/dev                           開発モードの出入り(係員用)
  *   GET    /api/dev/placeholder/:index        開発モードの見本画像(SVG)
  *   GET    /files/:file_id                    aging APIが元画像を取りに来る先。**唯一Basic認証の外**
@@ -434,6 +435,63 @@ const DISPLAY_THEMES = ['realistic', 'storybook', 'picturebook', 'tamatebako'];
 let displayTheme = 'realistic';
 
 /*
+ * ---- 本日の受付終了 ----
+ *
+ * 1日の上限に達したら、撮影ブースと閲覧ブースの両方に「今日はもうできない」
+ * ことを出す。締め切り方は2つあり、どちらか一方でも成立していれば終了とする。
+ *
+ *  1. 強制終了  … 係員が押した時点で即終了(閉場、機材の不調、時間切れなど)
+ *  2. 人数上限  … 係員が上限を入れた「その時点から」受け付けた人数を数え、
+ *                 上限に達した時点で終了
+ *
+ * 2の数え始めを「入力した時点」にしてあるのは、前日の試写や当日朝の試運転も
+ * 受付として数えてしまうと、実際に来場者を通せる人数が減ってしまうため。
+ * 上限を入れ直すと、その時点からまた0人で数え直す。
+ *
+ * どちらも再起動で消える(受付や結果と同じ)。会場で再起動が要る事態に
+ * なったら、係員が入れ直す。処理履歴には残す。
+ */
+let serviceClosedManually = false;
+let serviceClosedAtMs = null;
+// 受け付ける人数の上限。未設定(null)なら数えない
+let serviceLimit = null;
+// 上限を入れた時刻と、そこから受け付けた人数
+let serviceLimitSetAtMs = null;
+let serviceCounted = 0;
+
+// 上限として受け付ける最大値。会期2日で1200人の想定なので、打ち間違いを
+// 弾ける程度に広く取る(桁を1つ多く打ったときに気づけるようにするため)
+const MAX_SERVICE_LIMIT = 10000;
+
+/** 人数上限に達しているか。上限が未設定なら常に false。 */
+function serviceLimitReached() {
+  return serviceLimit !== null && serviceCounted >= serviceLimit;
+}
+
+/** 本日の受付を終えているか。 */
+function serviceIsClosed() {
+  return serviceClosedManually || serviceLimitReached();
+}
+
+/**
+ * 各ブースと係員画面に渡す締め切りの状態。
+ * 撮影ブースと閲覧ブースは closed と reason だけを見れば表示を切り替えられる。
+ */
+function serviceState() {
+  const closed = serviceIsClosed();
+  return {
+    closed,
+    // どちらで終わったか。係員画面の文言と、再開のしかたが変わる
+    reason: closed ? (serviceClosedManually ? 'manual' : 'limit') : null,
+    limit: serviceLimit,
+    counted: serviceLimit === null ? 0 : serviceCounted,
+    remaining: serviceLimit === null ? null : Math.max(0, serviceLimit - serviceCounted),
+    counting_since: serviceLimitSetAtMs ? new Date(serviceLimitSetAtMs).toISOString() : null,
+    closed_at: serviceClosedAtMs ? new Date(serviceClosedAtMs).toISOString() : null
+  };
+}
+
+/*
  * ---- 開発モード ----
  *
  * aging APIのユニットが尽きている間や、会場の設営中でまだ誰も撮影して
@@ -768,6 +826,8 @@ function currentDisplay() {
     dev_placeholder_count: devPlaceholderCount,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
+    // 本日の受付を終えたか。撮影ブースと閲覧ブースはこれを見て掲示を出す
+    service: serviceState(),
     entries
   };
 }
@@ -1223,6 +1283,20 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: 'ファイルが送信されていません' });
     }
+    /*
+     * 本日の受付を終えていたら受け取らない。他の検査より先に見る。
+     *
+     * 撮影ブースは締め切りを見て撮影そのものを出さなくなるため、ここに
+     * 来るのは「押した直後に締め切られた」場合だけ。念のための最後の砦で、
+     * 上限を1人でも超えないようにするためにサーバー側でも断る。
+     * 締め切っているのに「JPEGではありません」と返すと、撮影ブースが
+     * 掲示ではなく撮り直しの案内を出してしまうため、ここが先。
+     */
+    if (serviceIsClosed()) {
+      fs.unlinkSync(req.file.path);
+      addLog({ level: 'warn', event: 'entry:closed', status: 409, message: '本日の受付終了後に写真が届いたため受け取りませんでした' });
+      return res.status(409).json({ error: '本日の受付は終了しました', service: serviceState() });
+    }
     if (!isJpegFile(req.file.path)) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
@@ -1237,7 +1311,6 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       fs.unlinkSync(req.file.path);
       return res.status(507).json({ error: '受付の上限に達しています' });
     }
-
     const capturedAtMs = Date.now();
     const sourceFileId = req.generatedFileId;
     fileStore.set(sourceFileId, {
@@ -1271,6 +1344,20 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
     entryStore.set(entry.id, entry);
 
     addLog({ event: 'entry:created', status: 201, sequence: entry.sequence, message: `${req.file.size}バイトを受信` });
+
+    // 上限を入れてあるときだけ数える。達した時点で、この先の受付が止まる
+    if (serviceLimit !== null) {
+      serviceCounted += 1;
+      if (serviceLimitReached()) {
+        serviceClosedAtMs = Date.now();
+        addLog({
+          level: 'warn',
+          event: 'service:closed',
+          echo: true,
+          message: `人数上限 ${serviceLimit}人に達したため本日の受付を終了しました`
+        });
+      }
+    }
 
     // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める
     processEntry(entry, origin);
@@ -1383,6 +1470,77 @@ router.post('/api/display/clear', requireBasicAuth, (req, res) => {
   displayUpdatedAtMs = Date.now();
   displayMode = 'waiting';
   addLog({ event: 'display:clear', message: '待機画面に移行' });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/service
+ * 本日の受付を終える / 再開する / 人数上限を決める(係員用)。
+ *
+ * body の項目はどれも省略でき、届いたものだけを変える。
+ *   { "closed": true }        強制終了。この時点で撮影ブースと閲覧ブースに掲示が出る
+ *   { "closed": false }       再開。上限に達して止まっていた場合は0人から数え直す
+ *   { "limit": 120 }          上限を120人にして、この時点から数え始める(0人に戻す)
+ *   { "limit": null }         上限を解除する(強制終了は解除しない)
+ */
+router.post('/api/service', requireBasicAuth, (req, res) => {
+  const body = req.body || {};
+  const hasClosed = Object.prototype.hasOwnProperty.call(body, 'closed');
+  const hasLimit = Object.prototype.hasOwnProperty.call(body, 'limit');
+
+  if (!hasClosed && !hasLimit) {
+    return res.status(400).json({ error: 'closed か limit のどちらかを指定してください' });
+  }
+  if (hasClosed && typeof body.closed !== 'boolean') {
+    return res.status(400).json({ error: 'closed には true か false を指定してください' });
+  }
+  if (hasLimit && body.limit !== null) {
+    const wanted = Number(body.limit);
+    if (!Number.isInteger(wanted) || wanted < 1 || wanted > MAX_SERVICE_LIMIT) {
+      return res.status(400).json({ error: `limit は 1〜${MAX_SERVICE_LIMIT} の整数か null で指定してください` });
+    }
+  }
+
+  if (hasLimit) {
+    if (body.limit === null) {
+      serviceLimit = null;
+      serviceLimitSetAtMs = null;
+      serviceCounted = 0;
+      addLog({ level: 'warn', event: 'service:limit', message: '人数上限を解除しました(以後は数えません)' });
+    } else {
+      serviceLimit = Number(body.limit);
+      serviceLimitSetAtMs = Date.now();
+      // 入れ直したらその時点から数え直す。前日の試写や朝の試運転を
+      // 来場者ぶんとして数えてしまわないようにするため
+      serviceCounted = 0;
+      addLog({
+        level: 'warn',
+        event: 'service:limit',
+        echo: true,
+        message: `人数上限を ${serviceLimit}人に設定しました(いまから0人で数え直します)`
+      });
+    }
+  }
+
+  if (hasClosed) {
+    if (body.closed) {
+      serviceClosedManually = true;
+      serviceClosedAtMs = Date.now();
+      addLog({ level: 'warn', event: 'service:closed', echo: true, message: '係員の操作により本日の受付を終了しました' });
+    } else {
+      serviceClosedManually = false;
+      serviceClosedAtMs = null;
+      // 上限に達したまま再開すると、その場でまた終了してしまう。
+      // 再開と言われたら実際に受け付けられる状態にする
+      if (serviceLimitReached()) {
+        serviceCounted = 0;
+        serviceLimitSetAtMs = Date.now();
+        addLog({ level: 'warn', event: 'service:limit', message: `上限に達していたため、いまから0人で数え直します(上限 ${serviceLimit}人)` });
+      }
+      addLog({ level: 'warn', event: 'service:open', echo: true, message: '本日の受付を再開しました' });
+    }
+  }
+
   res.json(currentDisplay());
 });
 
