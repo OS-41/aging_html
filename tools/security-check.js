@@ -23,8 +23,17 @@
  *     「失敗したときの応答が2秒遅い」状態になる。**正しい資格情報は
  *     いつでも通る**ので、ブースの動作には影響しない。
  *
- * 出力は「確認したこと / 危険 / 要確認」の3つに分かれる。
- * 危険が1件でもあれば終了コード1で終わる。
+ * ---- 出ていくもの ----
+ *
+ * 進みながら1件ずつ結果を出す。画面に直接出しているときは下端に
+ * 進み具合の棒が付く(ファイルへ流したときは棒を出さず行だけ残す)。
+ * 最後に「確認できた / 要確認 / 危険」のまとめを出す。
+ *
+ *   終了コード 0 … 危険なし
+ *              1 … 危険あり(直してから本番に出すこと)
+ *              2 … 確認を始められなかった(届かない・認証に通らない)
+ *
+ * 色を消したいときは NO_COLOR=1 を付ける。
  */
 
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
@@ -43,9 +52,113 @@ const pass = [];
 const fail = [];
 const warn = [];
 
-const ok = (name, note = '') => pass.push({ name, note });
-const bad = (name, note = '') => fail.push({ name, note });
-const hmm = (name, note = '') => warn.push({ name, note });
+/*
+ * ---- 進み具合の見せ方 ----
+ *
+ * 全部で数分かかり、途中には**わざと12秒待つ確認(総当たり)**や、
+ * 黙った接続を80本開く確認があるため、何も出さないと固まったように見える。
+ * いま何を試しているかを出しながら進める。
+ *
+ * 画面に直接出しているとき(TTY)だけ、下端に棒を1本出して上書きしていく。
+ * ファイルへ流したときは上書きが化けるので、棒は出さず行だけを残す。
+ */
+const TTY = process.stdout.isTTY === true;
+const COLOR = TTY && !process.env.NO_COLOR;
+const c = (code, text) => (COLOR ? `\x1b[${code}m${text}\x1b[0m` : text);
+const green = (t) => c('32', t);
+const red = (t) => c('31;1', t);
+const yellow = (t) => c('33', t);
+const dim = (t) => c('2', t);
+const bold = (t) => c('1', t);
+
+const SECTIONS = [
+  '届いているか',
+  '入口(Basic認証)',
+  '公開パスの外',
+  '安全側のヘッダー',
+  '他所のページからの操作(CSRF)',
+  'パスの抜け道',
+  '画像の受け口',
+  '本文と型の細工',
+  '値の検証',
+  '元画像の受け口',
+  'ヘッダーの細工',
+  '送信量',
+  '認証の総当たり',
+  '同時接続',
+  '情報の出しすぎ',
+  '画面の中身',
+  '中身を知らない相手の手口'
+];
+
+const startedAtMs = Date.now();
+let sectionIndex = 0;
+let sectionTitle = '';
+let barShown = false;
+// 最初の区分に入るまでは棒を出さない(冒頭の案内の下でちらつかせないため)
+let barActive = false;
+
+function elapsed() {
+  const sec = Math.floor((Date.now() - startedAtMs) / 1000);
+  return `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+/** 下端の棒を消す(行を出す前に必ず呼ぶ) */
+function clearBar() {
+  if (!TTY || !barShown) return;
+  process.stdout.write('\r\x1b[2K');
+  barShown = false;
+}
+
+/** 下端に進み具合の棒を出す */
+function drawBar() {
+  if (!TTY || !barActive) return;
+  const total = SECTIONS.length;
+  const done = sectionIndex;
+  const width = 24;
+  const filled = Math.round((done / total) * width);
+  const bar = '█'.repeat(filled) + dim('─'.repeat(width - filled));
+  const counts = `${green(`OK ${pass.length}`)} ${fail.length ? red(`NG ${fail.length}`) : dim('NG 0')} ${warn.length ? yellow(`? ${warn.length}`) : dim('? 0')}`;
+  const line = `  [${bar}] ${String(done).padStart(2)}/${total}  ${counts}  ${dim(elapsed())}  ${dim(sectionTitle)}`;
+  process.stdout.write('\r\x1b[2K' + line.slice(0, (process.stdout.columns || 120) + 40));
+  barShown = true;
+}
+
+/** 棒を避けながら1行出す */
+function line(text = '') {
+  clearBar();
+  process.stdout.write(text + '\n');
+  drawBar();
+}
+
+/** 見出し。ここで棒も1つ進む */
+function section(n, title) {
+  line('');
+  line(bold(`[${String(n + 1).padStart(2)}/${SECTIONS.length}] ${title}`));
+  // 見出しを出してから棒を進める(いま何を試しているかが棒にも出る)
+  barActive = true;
+  sectionIndex = n;
+  sectionTitle = title;
+  drawBar();
+}
+
+/** 時間のかかる確認の前に、何を待っているかを出す */
+function doing(text) {
+  line(dim(`       … ${text}`));
+}
+
+const ok = (name, note = '') => {
+  pass.push({ name, note });
+  line(`  ${green('OK')}   ${name}${note ? dim(`  (${note})`) : ''}`);
+};
+const bad = (name, note = '') => {
+  fail.push({ name, note });
+  line(`  ${red('NG')}   ${red(name)}${note ? dim(`  (${note})`) : ''}`);
+};
+const hmm = (name, note = '') => {
+  warn.push({ name, note });
+  line(`  ${yellow('?')}    ${name}${note ? dim(`  (${note})`) : ''}`);
+};
 
 /**
  * 1回の要求。認証と、状態を変える要求に必要なヘッダーを既定で付ける。
@@ -113,29 +226,30 @@ function uploadForm(bytes, { type = 'image/jpeg', name = 'shot.jpg', origin = OR
 
 // ============================================================
 async function run() {
-  console.log(`対象: ${BASE}`);
-  console.log(`認証: ${AUTH ? `${USER} / ${'*'.repeat(Math.min(PASS.length, 12))}` : '(なし)'}\n`);
+  line(bold('展示用サーバーのセキュリティ確認'));
+  line(`  対象 : ${BASE}`);
+  line(`  認証 : ${AUTH ? `${USER} / ${'*'.repeat(Math.min(PASS.length, 12))}` : dim('(なし)')}`);
+  line(dim(`  ${SECTIONS.length}項目の区分を順に試します。総当たりの確認で12秒ほど待つところがあります。`));
 
   // ---- 0. 届いているか ----
+  section(0, '届いているか');
   const hello = await req('/api/display');
-  if (hello.status === 0) {
-    console.error(`到達できません: ${hello.text}`);
+  const stop = (message) => {
+    clearBar();
+    console.error(`\n${red('確認を始められません')}  ${message}`);
     process.exit(2);
-  }
-  if (hello.status === 401) {
-    console.error('認証に通りませんでした。ユーザー名とパスワードを確認してください。');
-    process.exit(2);
-  }
-  if (hello.status !== 200) {
-    console.error(`想定外の応答: ${hello.status} ${hello.text.slice(0, 200)}`);
-    process.exit(2);
-  }
+  };
+  if (hello.status === 0) stop(`到達できません: ${hello.text}`);
+  if (hello.status === 401) stop('認証に通りませんでした。ユーザー名とパスワードを確認してください。');
+  if (hello.status !== 200) stop(`想定外の応答: ${hello.status} ${hello.text.slice(0, 200)}`);
+  ok('サーバーに届いた', `${hello.status}`);
   const devMode = hello.json?.dev_mode === true;
-  console.log(devMode
-    ? '開発モード: 入っています（aging APIは呼ばれません）\n'
-    : '開発モード: 入っていません ★写真を送る確認は飛ばします\n');
+  line(devMode
+    ? `  ${green('開発モード: 入っています')}${dim('（aging APIは呼ばれません）')}`
+    : `  ${yellow('開発モード: 入っていません')} → 写真を送る確認は飛ばします`);
 
   // ---- 1. 入口 ----
+  section(1, '入口(Basic認証)');
   {
     const r = await req('/staff.html', { auth: false });
     (AUTH ? r.status === 401 : r.status === 200)
@@ -175,6 +289,7 @@ async function run() {
   }
 
   // ---- 2. 公開パスの外 ----
+  section(2, '公開パスの外');
   {
     const r = await req(ORIGIN + '/', { raw: true, auth: false });
     [401, 404].includes(r.status) ? ok('公開パスの外は出ない', `/ → ${r.status}`) : hmm('公開パスの外が応答する', `/ → ${r.status}`);
@@ -187,6 +302,7 @@ async function run() {
   }
 
   // ---- 3. 安全側のヘッダー ----
+  section(3, '安全側のヘッダー');
   {
     const r = await req('/');
     const want = {
@@ -209,6 +325,7 @@ async function run() {
   }
 
   // ---- 4. 他所のページからの操作(CSRF) ----
+  section(4, '他所のページからの操作(CSRF)');
   {
     for (const p of ['/api/display/advance', '/api/display/clear', '/api/display/updates', '/api/dev', '/api/service']) {
       const r = await req(p, { method: 'POST', crossSite: true });
@@ -223,6 +340,7 @@ async function run() {
   }
 
   // ---- 5. パスの抜け道 ----
+  section(5, 'パスの抜け道');
   {
     const targets = [
       '/../server.js', '/../../etc/passwd', '/..%2fserver.js', '/%2e%2e/server.js',
@@ -239,7 +357,9 @@ async function run() {
   }
 
   // ---- 6. 画像の受け口 ----
+  section(6, '画像の受け口');
   if (devMode) {
+    doing('偽物の画像7種と、細工したファイル名・originを送ります');
     const cases = [
       ['乱数をJPEGと偽る', Buffer.from(Array.from({ length: 2000 }, () => Math.floor(Math.random() * 256))), 'image/jpeg', 400],
       ['HTMLをJPEGと偽る', Buffer.from('<html><script>alert(1)</script></html>'), 'image/jpeg', 400],
@@ -280,6 +400,7 @@ async function run() {
   }
 
   // ---- 7. 本文と型の細工 ----
+  section(7, '本文と型の細工');
   {
     const cases = [
       ['壊れたJSON', '{"broken"', 'application/json', [400]],
@@ -306,6 +427,7 @@ async function run() {
   }
 
   // ---- 8. 値の検証 ----
+  section(8, '値の検証');
   {
     // JSON.stringify を通すと Infinity が null になってしまうため、本文は生で組む
     for (const [label, body, expect] of [
@@ -359,6 +481,7 @@ async function run() {
   }
 
   // ---- 9. 元画像の受け口(ここだけ認証の外) ----
+  section(9, '元画像の受け口');
   {
     const r = await req('/files/00000000-0000-0000-0000-000000000000', { auth: false });
     r.status === 404 ? ok('存在しないfile_idは404(認証の外)') : hmm('元画像の受け口の応答が想定と違う', `${r.status}`);
@@ -372,6 +495,7 @@ async function run() {
   }
 
   // ---- 10. ヘッダーの細工 ----
+  section(10, 'ヘッダーの細工');
   {
     // 接続元の偽装(認証の失敗回数を他人になすりつけられないか)
     const r = await req('/api/display', {
@@ -390,6 +514,7 @@ async function run() {
   }
 
   // ---- 11. 送信量 ----
+  section(11, '送信量');
   {
     const logs = await req('/api/logs?limit=200');
     const size = Buffer.byteLength(logs.text);
@@ -420,7 +545,9 @@ async function run() {
   }
 
   // ---- 12. 認証の総当たり ----
+  section(12, '認証の総当たり');
   if (AUTH) {
+    doing('わざと25回間違えます。遅延が効くので12秒ほどかかります');
     const started = Date.now();
     for (let i = 0; i < 25; i++) {
       await req('/api/display', {
@@ -441,7 +568,9 @@ async function run() {
   }
 
   // ---- 13. 同時接続 ----
+  section(13, '同時接続');
   {
+    doing('同時に60本つなぎます');
     const t0 = Date.now();
     const rs = await Promise.all(Array.from({ length: 60 }, () => req('/api/display')));
     const bad200 = rs.filter((r) => r.status !== 200).length;
@@ -454,6 +583,7 @@ async function run() {
   }
 
   // ---- 14. 情報の出しすぎ ----
+  section(14, '情報の出しすぎ');
   {
     const r = await req('/api/entries/00000000-0000-0000-0000-000000000000');
     /at \/|node_modules|\.js:\d+/.test(r.text)
@@ -473,6 +603,7 @@ async function run() {
   }
 
   // ---- 15. 画面の中身 ----
+  section(15, '画面の中身');
   {
     const page = await req('/capture.html');
     /AGING_API_KEY|Bearer [A-Za-z0-9_\-]{10}/.test(page.text)
@@ -491,6 +622,7 @@ async function run() {
   }
 
   // ---- 16. 中身を知らない相手が最初にやること ----
+  section(16, '中身を知らない相手の手口');
   //
   // ここまでは「コードを読んで気づいた穴」を確かめてきた。ここからは逆に、
   // 中身を何も知らない相手が、外から順に試していく手をなぞる。
@@ -510,6 +642,7 @@ async function run() {
     }
 
     // (b) 入口を教えてしまうファイルが置かれていないか
+    doing('外から順に叩いて、入口や置き忘れを探します');
     for (const path of ['/robots.txt', '/sitemap.xml', '/.well-known/security.txt', '/favicon.ico']) {
       const r = await req(`${scheme}//${host}${path}`, { raw: true, auth: false });
       r.status === 200 && new RegExp(BASE.split('/').pop()).test(r.text)
@@ -592,6 +725,7 @@ async function run() {
 
     // (h) 圧縮爆弾。展開後の大きさで断らないとメモリを食い尽くされる
     {
+      doing('圧縮爆弾を作っています(展開後60MB)');
       const zlib = require('zlib');
       const huge = Buffer.from('{"enabled":true,"x":"' + 'a'.repeat(60 * 1024 * 1024) + '"}');
       const gz = zlib.gzipSync(huge);
@@ -636,6 +770,7 @@ async function run() {
       const net = require('net');
       const isTls = scheme === 'https:';
       const port = new URL(BASE).port || (isTls ? 443 : 80);
+      doing('ヘッダーを送り切らない接続を80本開きます(5秒ほど)');
       const sockets = [];
       const N = 80;
       await new Promise((resolve) => {
@@ -693,31 +828,43 @@ async function run() {
   }
 
   // ============================================================
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`確認できたこと: ${pass.length}件`);
-  for (const p of pass) console.log(`  OK   ${p.name}${p.note ? `  (${p.note})` : ''}`);
+  // 途中で1件ずつ出しているので、最後はまとめだけを残す
+  // 最後に棒を満たしてから消す(途中で止まったのではないと分かるように)
+  sectionIndex = SECTIONS.length;
+  sectionTitle = '完了';
+  drawBar();
+  clearBar();
+
+  console.log(`\n${'='.repeat(62)}`);
+  console.log(bold(`  まとめ  ${SECTIONS.length}区分 / ${pass.length + warn.length + fail.length}項目 / ${elapsed()}`));
+  console.log('='.repeat(62));
+  console.log(`  ${green(`確認できた   ${String(pass.length).padStart(3)}件`)}`);
+  console.log(`  ${warn.length ? yellow(`要確認       ${String(warn.length).padStart(3)}件`) : dim('要確認         0件')}`);
+  console.log(`  ${fail.length ? red(`危険         ${String(fail.length).padStart(3)}件`) : dim('危険           0件')}`);
 
   if (warn.length) {
-    console.log(`\n要確認: ${warn.length}件`);
+    console.log(`\n${yellow('要確認')}（すぐ危ないものではないが、見ておくもの）`);
     for (const w of warn) console.log(`  ?    ${w.name}${w.note ? `  (${w.note})` : ''}`);
   }
-
   if (fail.length) {
-    console.log(`\n危険: ${fail.length}件`);
+    console.log(`\n${red('危険')}（直してから本番に出すもの）`);
     for (const f of fail) console.log(`  NG   ${f.name}${f.note ? `  (${f.note})` : ''}`);
-  } else {
-    console.log('\n危険: なし');
   }
-  console.log('='.repeat(60));
+  console.log('='.repeat(62));
 
+  if (fail.length === 0 && warn.length === 0) {
+    console.log(green('  指摘はありません。'));
+  }
   if (devMode) {
-    console.log('\n開発モード中のため、aging APIのユニットは使っていません。');
-    console.log('確認が済んだら係員画面で開発モードを切ってください（ここで作られた受付も消えます）。');
+    console.log(dim('\n  開発モード中のため、aging APIのユニットは使っていません。'));
+    console.log(dim('  確認が済んだら係員画面で開発モードを切ってください（ここで作られた受付も消えます）。'));
   }
   process.exit(fail.length ? 1 : 0);
 }
 
 run().catch((err) => {
-  console.error('確認そのものが失敗しました:', err);
+  clearBar();
+  console.error(`\n${red('確認そのものが失敗しました')}`);
+  console.error(err);
   process.exit(2);
 });
