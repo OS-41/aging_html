@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>係員用 運用画面</title>
+<!-- ホーム画面に追加したときの見え方。絵柄(操作卓のつまみ)と色(琥珀)で来場者向けの2つと見分ける -->
+<link rel="apple-touch-icon" href="icons/staff-180.png">
+<link rel="icon" href="icons/staff-180.png">
+<meta name="apple-mobile-web-app-title" content="係員">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#4a3411">
 <link rel="stylesheet" href="booth.css">
 <style>
   /* 詳細の背景。表の行より一段沈んだ色 */
@@ -1001,9 +1008,43 @@
    * HTTP通信の要求と応答の全文。一覧の「内容」は短くしてあるので、
    * 全文もここに併せて出す。
    */
+  /*
+   * 開いた行の詳細だけを、その都度サーバーから取る。
+   *
+   * 一覧には詳細を載せていない。1件あたり最大4000文字×3項目あり、
+   * 3秒ごとの更新で200件ぶんまとめて受け取ると1回が数MBになる。
+   * Renderの送信量は月単位で、使い切るとサービスが止まるため、
+   * 見ていない詳細のために通信量を使わない。
+   */
+  const logDetailCache = new Map();
+
+  async function loadLogDetail(id) {
+    if (logDetailCache.has(id)) return logDetailCache.get(id);
+    try {
+      const log = await callApi(`/api/logs/${id}`);
+      logDetailCache.set(id, log);
+      return log;
+    } catch (err) {
+      // 押すまでに流れていった場合もここに来る
+      const missing = { id, message: null, detail: null, gone: true };
+      logDetailCache.set(id, missing);
+      return missing;
+    }
+  }
+
   function buildLogDetail(log) {
     const box = document.createElement('div');
     box.className = 'detail';
+
+    if (!log) {
+      box.append(detailItem('詳細', '読み込んでいます…', false));
+      return box;
+    }
+    if (log.gone) {
+      box.append(detailItem('詳細', 'この記録はもう残っていません（新しいものから500件だけ保管します）', false));
+      return box;
+    }
+
     const detail = log.detail || {};
 
     const where = detail.where;
@@ -1028,6 +1069,10 @@
     const alive = new Set(logs.map((log) => log.id));
     for (const id of [...openLogRows]) {
       if (!alive.has(id)) openLogRows.delete(id);
+    }
+    // 取っておいた詳細も、流れていったものは捨てる(開きっぱなしで溜めない)
+    for (const id of [...logDetailCache.keys()]) {
+      if (!alive.has(id)) logDetailCache.delete(id);
     }
 
     const rows = [];
@@ -1075,10 +1120,17 @@
       text.textContent = log.message || '—';
 
       toggle.append(marker, text);
-      toggle.addEventListener('click', () => {
-        if (openLogRows.has(log.id)) openLogRows.delete(log.id);
-        else openLogRows.add(log.id);
+      toggle.addEventListener('click', async () => {
+        if (openLogRows.has(log.id)) {
+          openLogRows.delete(log.id);
+          renderLogs(logs);
+          return;
+        }
+        openLogRows.add(log.id);
+        // 先に「読み込んでいます」を出してから取りに行く
         renderLogs(logs);
+        await loadLogDetail(log.id);
+        if (openLogRows.has(log.id)) renderLogs(logs);
       });
       message.append(toggle);
 
@@ -1090,7 +1142,8 @@
         detailRow.className = 'detail-row';
         const cell = document.createElement('td');
         cell.colSpan = 6;
-        cell.append(buildLogDetail(log));
+        // 詳細は開いたときに取りに行く。届くまではその旨を出す
+        cell.append(buildLogDetail(logDetailCache.get(log.id) || null));
         detailRow.append(cell);
         rows.push(detailRow);
       }
@@ -1263,9 +1316,9 @@
     let statusData;
     try {
       [data, display, logData, statusData] = await Promise.all([
-        callApi('/api/entries'),
-        callApi('/api/display'),
-        callApi('/api/logs?limit=200'),
+        callApi('/api/entries', { revalidate: true }),
+        callApi('/api/display', { revalidate: true }),
+        callApi('/api/logs?limit=200', { revalidate: true }),
         callApi('/api/status')
       ]);
     } catch (err) {

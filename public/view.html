@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>閲覧ブース</title>
+<!-- ホーム画面に追加したときの見え方。絵柄(画面と人影)と色(緑)で撮影側と見分ける -->
+<link rel="apple-touch-icon" href="icons/view-180.png">
+<link rel="icon" href="icons/view-180.png">
+<meta name="apple-mobile-web-app-title" content="閲覧">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#123a32">
 <link rel="stylesheet" href="booth.css">
 <style>
   /*
@@ -664,7 +671,7 @@
 
   async function poll() {
     try {
-      const display = await callApi('/api/display');
+      const display = await callApi('/api/display', { revalidate: true });
       // 待機演出の絵柄は表示内容とは独立に切り替わる
       applyOceanTheme(display.theme);
       applyServiceClosed(display);

@@ -110,21 +110,50 @@ function detailJson(value) {
   }
 }
 
+/*
+ * 中身が変わっていなければ本文を受け取らないための控え。
+ *
+ * 各画面は3〜5秒ごとに同じ場所を見に来る。表示が変わらない間もまるごと
+ * 受け取っていると、一覧が育つほど通信量が増える(受付130件と履歴500件で
+ * 実測110MB/時)。Renderの送信量はワークスペースごとの月単位で、使い切ると
+ * サービスが止まるため、出ていく量そのものを減らしておく。
+ *
+ * サーバーはETagを付けてくる。前回の値を If-None-Match で送り返すと、
+ * 変わっていなければ304が返り、本文は流れない。そのときは前回の内容を
+ * そのまま使う(304は「同じ」という意味なので、使い回して問題ない)。
+ *
+ * ブラウザ任せ(Cache-Controlだけ)では実際には再確認が起きなかったため、
+ * 自分で送り、自分で持つ。
+ */
+const revalidateCache = new Map();
+
 /**
  * APIを呼び出してJSONを返す。Basic認証の資格情報を送るため
  * credentialsは既定の'same-origin'のままにする。
  * 失敗した場合はステータスコード付きで処理履歴に残す。
+ *
+ * @param {object} [options.revalidate]
+ *   trueにすると、前回と中身が同じ場合に本文を受け取らずに済ませる。
+ *   定期的に同じ場所を見に行くものにだけ付ける。
  */
 async function callApi(apiPath, options = {}) {
-  const method = (options.method || 'GET').toUpperCase();
+  const { revalidate = false, ...fetchOptions } = options;
+  const method = (fetchOptions.method || 'GET').toUpperCase();
   // FormDataは中身を展開できないので、種類だけを残す
-  const requestBody = typeof options.body === 'string' ? options.body
-    : (options.body ? `(${options.body.constructor?.name || typeof options.body})` : null);
-  const request = detailJson({ method, url: apiPath, headers: options.headers || null, body: requestBody });
+  const requestBody = typeof fetchOptions.body === 'string' ? fetchOptions.body
+    : (fetchOptions.body ? `(${fetchOptions.body.constructor?.name || typeof fetchOptions.body})` : null);
+  const request = detailJson({ method, url: apiPath, headers: fetchOptions.headers || null, body: requestBody });
+
+  const cached = revalidate ? revalidateCache.get(apiPath) : null;
+  if (cached) {
+    fetchOptions.headers = { ...fetchOptions.headers, 'If-None-Match': cached.etag };
+    // 自分で確かめるので、ブラウザ側の控えは挟ませない
+    fetchOptions.cache = 'no-store';
+  }
 
   let res;
   try {
-    res = await fetch(BACKEND_BASE + apiPath, { credentials: 'same-origin', ...options });
+    res = await fetch(BACKEND_BASE + apiPath, { credentials: 'same-origin', ...fetchOptions });
   } catch (networkErr) {
     clientErrorCount += 1;
     logEvent({
@@ -143,6 +172,11 @@ async function callApi(apiPath, options = {}) {
 
   if (res.status === 204) {
     return null;
+  }
+
+  // 前回と同じ。本文は流れていないので、控えておいた内容をそのまま使う
+  if (res.status === 304 && cached) {
+    return cached.payload;
   }
 
   const payload = await res.json().catch(() => ({}));
@@ -168,6 +202,13 @@ async function callApi(apiPath, options = {}) {
     error.status = res.status;
     error.payload = payload;
     throw error;
+  }
+
+  // 次回、変わっていなければ本文を受け取らずに済ませるための控え
+  if (revalidate) {
+    const etag = res.headers.get('etag');
+    if (etag) revalidateCache.set(apiPath, { etag, payload });
+    else revalidateCache.delete(apiPath);
   }
   return payload;
 }

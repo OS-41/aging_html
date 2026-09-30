@@ -66,9 +66,36 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN;
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
 const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
 
-// 公開パス。例: APP_BASE_PATH=/k7f3m2q8 とするとアプリ全体が
-// https://<host>/k7f3m2q8/ 配下でのみ動く。未設定ならルート直下。
-const BASE_PATH = (process.env.APP_BASE_PATH || '').replace(/\/+$/, '');
+/*
+ * 公開パス。例: APP_BASE_PATH=/k7f3m2q8 とするとアプリ全体が
+ * https://<host>/k7f3m2q8/ 配下でのみ動く。未設定ならルート直下。
+ *
+ * **書き方の揺れをここで吸収する。** 先頭の / を忘れると、
+ * Expressはどのパスにも当てはまらなくなり、**起動には成功するのに
+ * どの画面も開けない**という状態になる。ヘルスチェックは公開パスの外に
+ * あるので通ってしまい、デプロイは成功したように見える。
+ * 会場で気づくと復旧に再デプロイ(=再起動)が要るため、ここで直す。
+ *
+ * 併せて、そのままでは届かない書き方を起動時に警告する。
+ */
+function normaliseBasePath(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return { path: '', warning: null };
+
+  // 先頭に / を足し、末尾と重複した / を落とす
+  const path = ('/' + trimmed).replace(/\/+/g, '/').replace(/\/+$/, '');
+
+  // URLに載せるとブラウザが書き換えてしまう文字が入っていないか。
+  // (日本語や空白は送信時に%エンコードされ、こちらの文字列と一致しなくなる)
+  const warning = /^[A-Za-z0-9\-._~/]+$/.test(path)
+    ? null
+    : `APP_BASE_PATH に英数字と - . _ ~ / 以外が入っています(${path})。`
+      + 'ブラウザが書き換えるため、どの画面も開けない可能性があります';
+
+  return { path, warning };
+}
+
+const { path: BASE_PATH, warning: BASE_PATH_WARNING } = normaliseBasePath(process.env.APP_BASE_PATH);
 
 /**
  * 文字列を長さの差も含めて一定時間で比較する(総当たり時の情報漏れを防ぐ)。
@@ -224,6 +251,26 @@ function isDevelopmentOrigin(candidate) {
 const router = express.Router();
 
 /*
+ * 中身が変わっていなければ、本文を送らずに304で返す。
+ *
+ * 3つの画面は3〜5秒ごとに同じ場所を見に来る。表示が変わっていない間も
+ * 毎回まるごと送っていると、一覧が育つほど通信量が増えていく
+ * (受付300件で1回120KB。3秒ごとなら140MB/時)。
+ *
+ * Expressはres.jsonにETagを付けるので、あとは「毎回必ず確かめてから使う」
+ * と伝えれば、変わっていない回はブラウザ側のif-none-matchで304になり、
+ * 本文が流れない。no-store ではなく no-cache であることが要点で、
+ * no-store だと確かめ直す材料ごと捨ててしまい毎回まるごと送ることになる。
+ *
+ * Renderの送信量はワークスペースごとの月単位で、使い切るとサービスが
+ * 止まる。展示中に止まらないよう、出ていく量そのものを減らしておく。
+ */
+function revalidate(req, res, next) {
+  res.setHeader('Cache-Control', 'no-cache, private');
+  next();
+}
+
+/*
  * Renderはリバースプロキシの後ろでアプリを動かす。1段だけ信用して、
  * X-Forwarded-For の先頭を接続元として扱う(認証の失敗回数を接続元ごとに
  * 数えるため)。信用しないと全員が同じ接続元に見え、1人の総当たりで
@@ -249,10 +296,40 @@ app.use(express.json());
  * - X-Content-Type-Options: 中身を見て型を推測させない
  * - X-Frame-Options: 他所のページの枠に埋め込ませない
  */
+/*
+ * 画面が読み込んでよい先を、ここに挙げたものだけに絞る(CSP)。
+ *
+ * いまのところ画面に危険な組み立て(innerHTML等)は無いが、これは
+ * 「万一それが入り込んだときに、外へ持ち出させない」ための上乗せ。
+ * connect-src を自分自身だけにしてあるので、仮に何かを差し込まれても
+ * 撮った写真や資格情報を他所へ送る先が無い。
+ *
+ * - 'unsafe-inline': 各画面は <script> と <style> を直接書いているため必要。
+ *   外部からの読み込み(script-src 'self')は塞がるので、持ち出しは止まる
+ * - blob: と data:: 撮影した写真をcanvasから取り出すのに使う
+ * - worker-src に blob:: MediaPipeが切り抜きを別スレッドで動かすため
+ * - frame-ancestors 'none': X-Frame-Options と同じことを新しい書き方でも
+ */
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "worker-src 'self' blob:",
+  "connect-src 'self' blob:",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'"
+].join('; ');
+
 app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', CSP);
   if (PUBLIC_ORIGIN) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
@@ -898,15 +975,39 @@ const upload = multer({
  * 保存されたファイルの先頭がJPEGのマジックバイト(FF D8 FF)かを検証する。
  * Content-Typeは詐称できるため、実体が画像であることを確認して
  * HTML等の別形式のコンテンツをホストさせられるのを防ぐ。
+ *
+ * 読めなかった場合は「JPEGではない」として扱う。ここで例外を投げると
+ * 受け口の非同期処理の外へ出てしまい、プロセスごと落ちる道になる。
  */
 function isJpegFile(filePath) {
-  const fd = fs.openSync(filePath, 'r');
+  let fd;
   try {
+    fd = fs.openSync(filePath, 'r');
     const header = Buffer.alloc(3);
     const bytesRead = fs.readSync(fd, header, 0, 3, 0);
     return bytesRead === 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  } catch (err) {
+    addLog({ level: 'warn', event: 'file:verify', message: `受け取った画像を確認できません: ${err.message}` });
+    return false;
   } finally {
-    fs.closeSync(fd);
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * 受け取ったばかりの一時ファイルを消す。
+ *
+ * 既に無い場合も、消せない場合も、そのまま進む。保持期間の掃除と
+ * 重なって先に消えていることがあり、そこで例外を投げると受け口の
+ * 非同期処理の外へ出てプロセスごと落ちる道になる。
+ */
+function discardUpload(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      addLog({ level: 'warn', event: 'file:delete', message: `受け取った画像を削除できません: ${err.message}` });
+    }
   }
 }
 
@@ -1142,14 +1243,54 @@ async function processEntry(entry, origin) {
    * 本番では通らない道なので、加工前の写真が「未来のあなた」として
    * 出ることはない(開発モードを終えるとこの受付は削除される)。
    */
+  // ここは try の外なので、投げれば呼び出し元(受け口)の外へ出る。
+  // keepOriginalAsResult と deleteStoredFile は自分で失敗を処理するが、
+  // 将来ここに手を入れたときのために、この段も囲っておく
   if (devMode) {
-    const shown = await keepOriginalAsResult(entry);
+    /*
+     * **開発モードでは、何があってもaging APIを呼ばない。**
+     *
+     * 以前はここで控えに失敗したとき「通常どおりAPIに投げる」ようにして
+     * いたが、それだと開発モードの意味が「たいていユニットを使わない」に
+     * なってしまう。ユニットを使わずに通しで確かめられることがこのモードの
+     * 唯一の存在理由なので、控えられなければ受付を失敗として終える。
+     *
+     * 失敗するのはディスクが埋まったときなど限られた場合だが、
+     * 「限られた場合には課金される」作りにしておくと、いざそれが起きた
+     * ときに気づけないまま枠を減らすことになる。
+     */
+    let shown = false;
+    try {
+      shown = await keepOriginalAsResult(entry);
+    } catch (devErr) {
+      addLog({
+        level: 'error',
+        event: 'entry:fallback',
+        sequence: entry.sequence,
+        message: `開発モードの控えに失敗: ${devErr.message}`,
+        detail: { error: devErr.stack || String(devErr) }
+      });
+    }
+
     if (shown) {
       deleteStoredFile(entry.sourceFileId);
       entry.sourceFileId = null;
       return;
     }
-    // 控えられなかったときは、通常どおりAPIに投げる
+
+    entry.status = 'error';
+    entry.error = '開発モードのため、撮影した写真をそのまま出そうとしましたが控えられませんでした';
+    if (entry.sourceFileId) {
+      deleteStoredFile(entry.sourceFileId);
+      entry.sourceFileId = null;
+    }
+    addLog({
+      level: 'error',
+      event: 'entry:error',
+      sequence: entry.sequence,
+      message: '開発モードのため、aging APIには送らずに失敗として終えました'
+    });
+    return;
   }
 
   try {
@@ -1293,22 +1434,22 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
      * 掲示ではなく撮り直しの案内を出してしまうため、ここが先。
      */
     if (serviceIsClosed()) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       addLog({ level: 'warn', event: 'entry:closed', status: 409, message: '本日の受付終了後に写真が届いたため受け取りませんでした' });
       return res.status(409).json({ error: '本日の受付は終了しました', service: serviceState() });
     }
     if (!isJpegFile(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(400).json({ error: 'JPEG画像として認識できないファイルです' });
     }
 
     const origin = resolvePublicOrigin(req.body?.origin);
     if (!origin) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(400).json({ error: '許可されていないoriginです' });
     }
     if (entryStore.size >= MAX_ENTRIES) {
-      fs.unlinkSync(req.file.path);
+      discardUpload(req.file.path);
       return res.status(507).json({ error: '受付の上限に達しています' });
     }
     const capturedAtMs = Date.now();
@@ -1359,8 +1500,20 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       }
     }
 
-    // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める
-    processEntry(entry, origin);
+    // 撮影ブースを待たせないよう、生成はレスポンス後に裏で進める。
+    // 待たない代わりに、失敗の行き先をここで必ず受けておく
+    // (受けないと、拾われなかったPromiseの失敗としてプロセスごと落ちる)
+    processEntry(entry, origin).catch((err) => {
+      entry.status = 'error';
+      entry.error = err.message;
+      addLog({
+        level: 'error',
+        event: 'entry:error',
+        sequence: entry.sequence,
+        message: (err.message || '生成に失敗').split(' / ')[0],
+        detail: { error: err.stack || String(err) }
+      });
+    });
 
     res.status(201).json({
       entry_id: entry.id,
@@ -1374,7 +1527,7 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
  * GET /api/entries
  * 受付の一覧を撮影時刻の古い順に返す(閲覧ブースの一覧・係員の確認用)。
  */
-router.get('/api/entries', requireBasicAuth, (req, res) => {
+router.get('/api/entries', requireBasicAuth, revalidate, (req, res) => {
   const entries = entriesInOrder().map(toPublicEntry);
   res.json({
     entries,
@@ -1387,7 +1540,7 @@ router.get('/api/entries', requireBasicAuth, (req, res) => {
  * GET /api/display
  * 閲覧ブースに映している内容。職員が入れ替えるまで変わらない。
  */
-router.get('/api/display', requireBasicAuth, (req, res) => {
+router.get('/api/display', requireBasicAuth, revalidate, (req, res) => {
   res.json(currentDisplay());
 });
 
@@ -1494,10 +1647,18 @@ router.post('/api/service', requireBasicAuth, (req, res) => {
   if (hasClosed && typeof body.closed !== 'boolean') {
     return res.status(400).json({ error: 'closed には true か false を指定してください' });
   }
+  /*
+   * 数として受け取れるかではなく、**数で送られてきたか**を見る。
+   *
+   * Number() に通すだけだと true が 1 に、[5] が 5 に、"0x10" が 16 になる。
+   * とくに true → 1 は、送る側の取り違え1つで「1人で本日の受付終了」に
+   * なってしまい、しかも 200 が返るので気づけない。
+   * 上限は展示そのものを止める値なので、曖昧な受け取り方をしない。
+   */
   if (hasLimit && body.limit !== null) {
-    const wanted = Number(body.limit);
-    if (!Number.isInteger(wanted) || wanted < 1 || wanted > MAX_SERVICE_LIMIT) {
-      return res.status(400).json({ error: `limit は 1〜${MAX_SERVICE_LIMIT} の整数か null で指定してください` });
+    const wanted = body.limit;
+    if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_SERVICE_LIMIT) {
+      return res.status(400).json({ error: `limit は 1〜${MAX_SERVICE_LIMIT} の整数(数値)か null で指定してください` });
     }
   }
 
@@ -1577,8 +1738,12 @@ router.post('/api/dev', requireBasicAuth, (req, res) => {
   }
 
   // 人数ごとの並びを確かめられるよう、見本の枚数を選べる
-  const wanted = Number(req.body?.placeholders);
-  if (Number.isInteger(wanted)) {
+  // 上限と同じ理由で、数で送られてきたときだけ受ける(true が 1 にならないように)
+  const wanted = req.body?.placeholders;
+  if (wanted !== undefined && wanted !== null) {
+    if (typeof wanted !== 'number' || !Number.isInteger(wanted)) {
+      return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} の整数(数値)で指定してください` });
+    }
     if (wanted < 1 || wanted > DISPLAY_SLOT_COUNT) {
       return res.status(400).json({ error: `placeholders は 1〜${DISPLAY_SLOT_COUNT} で指定してください` });
     }
@@ -1742,10 +1907,46 @@ router.get('/api/status', requireBasicAuth, (req, res) => {
 /**
  * GET /api/logs
  * 処理履歴(サーバー・クライアント双方)を新しい順に返す。
+ *
+ * **詳細(where/error/request/response)はここでは返さない。**
+ * 係員画面はこれを3秒ごとに取りに来る。詳細は1件あたり最大4000文字×3項目
+ * あるため、全部載せると1回の応答が数MBになり、それを1時間に1200回
+ * 繰り返すことになる(実測でGB/時の桁)。Renderの送信量はワークスペース
+ * ごとの月単位で、使い切るとサービスが止まるため、ここで通信量が
+ * 増えるほど展示そのものが危うくなる。しかも詳細が大きくなるのは
+ * 異常が続いているときなので、いちばん止まってほしくないときに
+ * いちばん速く使い切る作りになってしまう。
+ *
+ * 代わりに has_detail だけを返し、実際の中身は開いたときに
+ * GET /api/logs/:id で1件だけ取りに来てもらう。
  */
-router.get('/api/logs', requireBasicAuth, (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 100, MAX_LOG_ENTRIES);
-  res.json({ logs: [...logStore].reverse().slice(0, limit) });
+function toPublicLog(log) {
+  const { detail, ...rest } = log;
+  return { ...rest, has_detail: detail !== null && detail !== undefined };
+}
+
+router.get('/api/logs', requireBasicAuth, revalidate, (req, res) => {
+  // クエリは必ず文字列で来るので数に直す。負の数や桁違いはここで丸める
+  // (負のまま slice に渡すと、新しい順のはずが末尾を削る動きになる)
+  const asked = Number(req.query.limit);
+  const limit = Number.isFinite(asked) && asked > 0
+    ? Math.min(Math.floor(asked), MAX_LOG_ENTRIES)
+    : 100;
+  res.json({ logs: [...logStore].reverse().slice(0, limit).map(toPublicLog) });
+});
+
+/**
+ * GET /api/logs/:id
+ * 1件の処理履歴を、詳細つきで返す(係員が「内容」を押したとき)。
+ */
+router.get('/api/logs/:id', requireBasicAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const log = Number.isInteger(id) ? logStore.find((entry) => entry.id === id) : null;
+  if (!log) {
+    // 古いものは押すまでに流れていることがある。係員画面はこれを見て案内を出す
+    return res.status(404).json({ error: 'その記録はもう残っていません' });
+  }
+  res.json(log);
 });
 
 /**
@@ -1845,12 +2046,78 @@ app.get('/healthz', (req, res) => {
   res.type('text/plain').send('ok');
 });
 
-// フロントエンドの静的配信。Basic認証の対象にする。
-// (Codespaceでは従来通り `npm run serve:web` で別ポートから配信してもよい)
-router.use(requireBasicAuth, express.static(path.join(__dirname, 'public')));
+/*
+ * フロントエンドの静的配信。Basic認証の対象にする。
+ * (Codespaceでは従来通り `npm run serve:web` で別ポートから配信してもよい)
+ *
+ * public/vendor には、外部から取ってきてそのまま同梱しているものが入る
+ * (撮影ブースの背景合成に使う MediaPipe Selfie Segmentation)。
+ * .wasm は型が合っていないとブラウザが読み込みを拒むため明示する。
+ * .tflite や .binarypb はもともと型を持たないので既定のまま
+ * (application/octet-stream) でよい。
+ */
+router.use(requireBasicAuth, express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.wasm')) {
+      res.setHeader('Content-Type', 'application/wasm');
+    }
+  }
+}));
 
 app.use(BASE_PATH || '/', router);
+
+/*
+ * どこを叩いても、資格情報が無ければ同じ401を返す。
+ *
+ * 公開パスは「推測困難であること」を頼りにしている。ところが、正しいパスは
+ * 認証を求めて401、外れたパスは404、と応答が違うと、**資格情報を一つも
+ * 持たない相手でも、応答の違いだけで公開パスを総当たりで探し当てられる。**
+ * 401が返った時点で「ここが入口だ」と分かってしまう。
+ *
+ * そこで、routerが受け取らなかった要求もこの中継を通し、資格情報が無ければ
+ * 401、あれば普通の404を返す。外から見ると、どのパスも区別なく401になる。
+ * 総当たりは処理履歴にも残り、続けば応答が遅くなる(requireBasicAuthと同じ)。
+ *
+ * ヘルスチェック(/healthz)はこれより前に登録してあるので影響を受けない。
+ * Expressの既定のエラー画面(Expressだと分かるHTML)もここで置き換わる。
+ */
+app.use(requireBasicAuth, (req, res) => {
+  res.status(404).json({ error: '見つかりません' });
+});
 //NOTE: ここまでRender公開用の配信設定
+
+/*
+ * 想定していない例外で、プロセスごと落ちないようにする。
+ *
+ * Node 22は、拾われなかった例外と拾われなかったPromiseの失敗で
+ * プロセスを終了させる。ここでのそれは「Renderが新しいインスタンスを
+ * 立ち上げる」という意味になり、**保管していた受付と結果が全部消え、
+ * 受付番号も1番に戻る**。展示中にこれが起きるのがいちばん困る。
+ *
+ * ふつうのサーバーなら、状態が壊れている可能性があるので落として
+ * 入れ直すのが正しい。ここでそうしないのは、
+ *
+ *  - 落ちたときに失われるものが、来場者の写真そのものだから
+ *  - ここで起きうる例外は要求1件ぶんの処理の中の出来事(消そうとした
+ *    ファイルがもう無い、など)で、他の受付の状態を壊すものではないから
+ *  - 落ちれば「確実に全部消える」のに対し、続ければ「その1件だけが
+ *    失敗する」で済むから
+ *
+ * の3つによる。握りつぶすのではなく、処理履歴とホスティング側のログの
+ * 両方に必ず残すので、あとから追える。
+ */
+function survive(kind, err) {
+  addLog({
+    level: 'error',
+    event: 'server:survived',
+    echo: true,
+    message: `${kind}: ${err?.message || String(err)}（処理を続けます）`,
+    detail: { error: err?.stack || String(err) }
+  });
+}
+
+process.on('uncaughtException', (err) => survive('拾われなかった例外', err));
+process.on('unhandledRejection', (reason) => survive('拾われなかったPromiseの失敗', reason));
 
 // "0.0.0.0"を明示することで、IPv6優先バインドとの相性問題により
 // GitHub Codespacesのポート転送プロキシ(IPv4経由)から到達できず
@@ -1865,4 +2132,21 @@ app.listen(PORT, '0.0.0.0', () => {
     echo: true,
     message: `http://localhost:${PORT}${BASE_PATH || ''}/ で待ち受け開始(保管中の受付と結果は初期化されています)`
   });
+
+  // 公開パスの書き方が怪しいときは、起動直後に気づけるようにする。
+  // 会場で「どの画面も開けない」となってから探すことにならないため
+  if (BASE_PATH_WARNING) {
+    addLog({ level: 'error', event: 'server:start', echo: true, message: BASE_PATH_WARNING });
+  }
+  if (process.env.APP_BASE_PATH && process.env.APP_BASE_PATH.trim() !== BASE_PATH) {
+    addLog({
+      level: 'warn',
+      event: 'server:start',
+      echo: true,
+      message: `APP_BASE_PATH を "${process.env.APP_BASE_PATH}" から "${BASE_PATH}" として扱いました`
+    });
+  }
+  if (!BASIC_AUTH_USER || !BASIC_AUTH_PASSWORD) {
+    addLog({ level: 'error', event: 'server:start', echo: true, message: 'Basic認証が無効です(BASIC_AUTH_USER と BASIC_AUTH_PASSWORD の両方が必要)' });
+  }
 });

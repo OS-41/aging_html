@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>撮影ブース</title>
+<!--
+  ホーム画面に追加したときの見え方。3台を並べても取り違えないよう、
+  絵柄(カメラ)と色(青)で役割が分かるようにしてある。
+  apple-mobile-web-app-capable を付けると、ここから起動したときに
+  Safariの枠が一切出ない。キオスクとしてはこれが一番静かになる。
+-->
+<link rel="apple-touch-icon" href="icons/capture-180.png">
+<link rel="icon" href="icons/capture-180.png">
+<meta name="apple-mobile-web-app-title" content="撮影">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#16325c">
 <link rel="stylesheet" href="booth.css">
 <style>
   /* 撮影後に表示する受付番号。閲覧ブースで呼ばれる順番そのもの */
@@ -480,8 +492,9 @@
 
   // ---- 背景合成 ----
   // 人物だけを切り抜いて背景画像の上に重ねる。切り抜きにはMediaPipeの
-  // Selfie Segmentationを使うが、会場のネットワークで読み込めないことも
-  // あるため、失敗したらカメラ映像をそのまま使う方式に自動で切り替える。
+  // Selfie Segmentationを使う。ファイルはこのサーバーから配るので会場の
+  // ネットワークには依存しないが、端末側で動かない場合に備えて、
+  // 失敗したらカメラ映像をそのまま使う方式に自動で切り替える。
 
   const previewCtx = preview.getContext('2d');
   let segmenter = null;
@@ -558,7 +571,7 @@
   async function syncDisplay() {
     let display;
     try {
-      display = await callApi('/api/display');
+      display = await callApi('/api/display', { revalidate: true });
     } catch (err) {
       // 取得できなければ現在の状態のまま(絵柄も開発モードも変えない)
       return;
@@ -650,19 +663,29 @@
   /**
    * MediaPipeのSelfie Segmentationを読み込む。
    * 読み込めなければ合成なしで動かす。
+   *
+   * 配信は自前(public/vendor/selfie_segmentation)。以前は cdn.jsdelivr.net から
+   * 版の指定なしで読んでいたが、それだと
+   *  ・会場のネットワークがそのCDNに届くかどうかが当日の心配事になる
+   *  ・当日読み込まれるのが「その時点で最新の版」になり、事前の確認と変わりうる
+   *  ・カメラ映像を扱っているこのページで、他所のコードが動く
+   * という3つを抱えることになる。同じ場所から配ればいずれも無くなる。
+   * 中身と取得元は public/vendor/README.md に控えてある。
    */
+  const SEGMENTATION_DIR = 'vendor/selfie_segmentation';
+
   async function setupSegmentation() {
-    const CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation';
     try {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
-        script.src = `${CDN}/selfie_segmentation.js`;
+        script.src = `${SEGMENTATION_DIR}/selfie_segmentation.js`;
         script.onload = resolve;
         script.onerror = () => reject(new Error('スクリプトを読み込めません'));
         document.head.appendChild(script);
       });
 
-      segmenter = new SelfieSegmentation({ locateFile: (file) => `${CDN}/${file}` });
+      // モデル本体やwasmも同じ場所から取らせる
+      segmenter = new SelfieSegmentation({ locateFile: (file) => `${SEGMENTATION_DIR}/${file}` });
       segmenter.setOptions({ modelSelection: 1 });
       segmenter.onResults((results) => {
         drawComposite(results.image, results.segmentationMask);
