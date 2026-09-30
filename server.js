@@ -66,9 +66,36 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN;
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
 const BASIC_AUTH_PASSWORD = process.env.BASIC_AUTH_PASSWORD;
 
-// 公開パス。例: APP_BASE_PATH=/k7f3m2q8 とするとアプリ全体が
-// https://<host>/k7f3m2q8/ 配下でのみ動く。未設定ならルート直下。
-const BASE_PATH = (process.env.APP_BASE_PATH || '').replace(/\/+$/, '');
+/*
+ * 公開パス。例: APP_BASE_PATH=/k7f3m2q8 とするとアプリ全体が
+ * https://<host>/k7f3m2q8/ 配下でのみ動く。未設定ならルート直下。
+ *
+ * **書き方の揺れをここで吸収する。** 先頭の / を忘れると、
+ * Expressはどのパスにも当てはまらなくなり、**起動には成功するのに
+ * どの画面も開けない**という状態になる。ヘルスチェックは公開パスの外に
+ * あるので通ってしまい、デプロイは成功したように見える。
+ * 会場で気づくと復旧に再デプロイ(=再起動)が要るため、ここで直す。
+ *
+ * 併せて、そのままでは届かない書き方を起動時に警告する。
+ */
+function normaliseBasePath(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return { path: '', warning: null };
+
+  // 先頭に / を足し、末尾と重複した / を落とす
+  const path = ('/' + trimmed).replace(/\/+/g, '/').replace(/\/+$/, '');
+
+  // URLに載せるとブラウザが書き換えてしまう文字が入っていないか。
+  // (日本語や空白は送信時に%エンコードされ、こちらの文字列と一致しなくなる)
+  const warning = /^[A-Za-z0-9\-._~/]+$/.test(path)
+    ? null
+    : `APP_BASE_PATH に英数字と - . _ ~ / 以外が入っています(${path})。`
+      + 'ブラウザが書き換えるため、どの画面も開けない可能性があります';
+
+  return { path, warning };
+}
+
+const { path: BASE_PATH, warning: BASE_PATH_WARNING } = normaliseBasePath(process.env.APP_BASE_PATH);
 
 /**
  * 文字列を長さの差も含めて一定時間で比較する(総当たり時の情報漏れを防ぐ)。
@@ -2105,4 +2132,21 @@ app.listen(PORT, '0.0.0.0', () => {
     echo: true,
     message: `http://localhost:${PORT}${BASE_PATH || ''}/ で待ち受け開始(保管中の受付と結果は初期化されています)`
   });
+
+  // 公開パスの書き方が怪しいときは、起動直後に気づけるようにする。
+  // 会場で「どの画面も開けない」となってから探すことにならないため
+  if (BASE_PATH_WARNING) {
+    addLog({ level: 'error', event: 'server:start', echo: true, message: BASE_PATH_WARNING });
+  }
+  if (process.env.APP_BASE_PATH && process.env.APP_BASE_PATH.trim() !== BASE_PATH) {
+    addLog({
+      level: 'warn',
+      event: 'server:start',
+      echo: true,
+      message: `APP_BASE_PATH を "${process.env.APP_BASE_PATH}" から "${BASE_PATH}" として扱いました`
+    });
+  }
+  if (!BASIC_AUTH_USER || !BASIC_AUTH_PASSWORD) {
+    addLog({ level: 'error', event: 'server:start', echo: true, message: 'Basic認証が無効です(BASIC_AUTH_USER と BASIC_AUTH_PASSWORD の両方が必要)' });
+  }
 });
