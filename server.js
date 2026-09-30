@@ -1845,9 +1845,23 @@ app.get('/healthz', (req, res) => {
   res.type('text/plain').send('ok');
 });
 
-// フロントエンドの静的配信。Basic認証の対象にする。
-// (Codespaceでは従来通り `npm run serve:web` で別ポートから配信してもよい)
-router.use(requireBasicAuth, express.static(path.join(__dirname, 'public')));
+/*
+ * フロントエンドの静的配信。Basic認証の対象にする。
+ * (Codespaceでは従来通り `npm run serve:web` で別ポートから配信してもよい)
+ *
+ * public/vendor には、外部から取ってきてそのまま同梱しているものが入る
+ * (撮影ブースの背景合成に使う MediaPipe Selfie Segmentation)。
+ * .wasm は型が合っていないとブラウザが読み込みを拒むため明示する。
+ * .tflite や .binarypb はもともと型を持たないので既定のまま
+ * (application/octet-stream) でよい。
+ */
+router.use(requireBasicAuth, express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.wasm')) {
+      res.setHeader('Content-Type', 'application/wasm');
+    }
+  }
+}));
 
 app.use(BASE_PATH || '/', router);
 //NOTE: ここまでRender公開用の配信設定
