@@ -178,10 +178,31 @@ async function req(path, options = {}) {
   try {
     const res = await fetch(url, { method, headers: h, body, redirect });
     const text = await res.text();
+    if (CDN_THROTTLED.includes(res.status)) countThrottle();
     return { status: res.status, headers: res.headers, text, json: safeJson(text) };
   } catch (err) {
     return { status: 0, headers: new Headers(), text: String(err), json: null, error: err };
   }
+}
+
+/** 絞られた回数を数え、続けても当てにならない段になったら止める */
+function countThrottle() {
+  throttledCount += 1;
+  if (throttledCount < THROTTLE_ABORT_AT || abortedByThrottle) return;
+  abortedByThrottle = true;
+  clearBar();
+  console.error(`\n${yellow('前段(CDN)に絞られたため、途中で止めました')}`);
+  console.error(`  429/503 が ${throttledCount} 件。ここから先は断られたのか通ったのかが分からず、`);
+  console.error('  結果が当てになりません（確かめられていないものが「危険」として並んでしまいます）。');
+  console.error('');
+  console.error('  データセンターのIP(GitHub Codespacesなど)から流すと起きやすくなります。');
+  console.error('  10〜15分ほど置いてから流し直すか、手元の回線から流し直してください。');
+  console.error(`\n  ここまでの結果: 確認できた ${pass.length}件 / 要確認 ${warn.length}件 / 危険 ${fail.length}件`);
+  if (fail.length) {
+    console.error(`\n  ${red('止まるまでに出た「危険」')}（絞られた影響かもしれないので、流し直して確かめること）`);
+    for (const f of fail) console.error(`    NG   ${f.name}${f.note ? `  (${f.note})` : ''}`);
+  }
+  process.exit(2);
 }
 
 function safeJson(text) {
@@ -204,9 +225,36 @@ function safeJson(text) {
  * 本当に見るべきものが埋もれる。
  */
 const CDN_BLOCKED = 403;
+/*
+ * 前段が「絞った」ときの応答。拒否(403)とは意味が違う。
+ *
+ * 403 は「その要求は通さない」という判断なので、断ってほしかった確認では
+ * 目的が達せられている。429/503 は「今は相手をしない」なので、**何も
+ * 確かめられていない**。データセンターのIP(Codespacesなど)から流すと、
+ * 同時60本や黙った接続80本のあとにこれが返ることがある。
+ */
+const CDN_THROTTLED = [429, 503];
+let throttledCount = 0;
+
+/*
+ * 前段に絞られ始めたら、その先の結果は当てにならない。
+ *
+ * 絞られた応答(429/503)は、断られたのでも通ったのでもなく「相手にされて
+ * いない」状態。そのまま続けると、確かめられていないものが「危険」として
+ * 大量に並び、本当に見るべきものが埋もれる。数件を超えたらそこで止めて、
+ * 時間を置いて流し直してもらう。
+ */
+const THROTTLE_ABORT_AT = 5;
+let abortedByThrottle = false;
+
+function noteThrottled(name, status, note) {
+  throttledCount += 1;
+  return hmm(`${name}（確かめられず）`, `前段(CDN)に絞られた(${status})。しばらく置いて流し直す${note ? ` / ${note}` : ''}`);
+}
 
 /** 断ってほしかった確認。403は前段が断った印として通す。 */
 function expectReject(name, status, allowed, note = '') {
+  if (CDN_THROTTLED.includes(status)) return noteThrottled(name, status, note);
   if (status === CDN_BLOCKED) return ok(name, `前段(CDN)が拒否${note ? ` / ${note}` : ''}`);
   if (allowed.includes(status)) return ok(name, `${status}${note ? ` / ${note}` : ''}`);
   return bad(name, `${status} 期待${allowed.join('・')}${note ? ` / ${note}` : ''}`);
@@ -214,6 +262,7 @@ function expectReject(name, status, allowed, note = '') {
 
 /** 通ってほしかった確認。403だと確かめられていないので要確認にする。 */
 function expectPass(name, status, allowed, note = '') {
+  if (CDN_THROTTLED.includes(status)) return noteThrottled(name, status, note);
   if (status === CDN_BLOCKED) {
     return hmm(`${name}（確かめられず）`, `前段(CDN)が弾いたため、こちらの作りは未確認${note ? ` / ${note}` : ''}`);
   }
@@ -924,6 +973,11 @@ async function run() {
 
   if (fail.length === 0 && warn.length === 0) {
     console.log(green('  指摘はありません。'));
+  }
+  if (throttledCount >= 3) {
+    console.log(yellow(`\n  前段(CDN)に${throttledCount}件絞られています。`));
+    console.log('  データセンターのIP(Codespacesなど)から流すと起きやすくなります。');
+    console.log('  10〜15分ほど置いてから流し直すか、手元の回線から流し直してください。');
   }
   if (devMode) {
     console.log(dim('\n  開発モード中のため、aging APIのユニットは使っていません。'));
