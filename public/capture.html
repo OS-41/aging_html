@@ -287,6 +287,12 @@
     <div class="staff-bar">
       <span>撮影ブース</span>
       <span>受付済み <span class="count" id="sentCount">0</span> 件</span>
+      <!--
+        いま受付中の組。係員用の画面で人数を押すとここが変わる。
+        ここが「組なし」のまま撮ると、閲覧ブースで次の組に混ざるため、
+        撮影側がひと目で気づけるように出しておく(表示だけで、操作はしない)。
+      -->
+      <span>組 <span class="count" id="groupHint">—</span></span>
       <label>カメラ
         <select id="cameraSelect">
           <option value="">既定のカメラ</option>
@@ -359,6 +365,7 @@
   const receipt = document.getElementById('receipt');
   const receiptNumber = document.getElementById('receiptNumber');
   const sentCount = document.getElementById('sentCount');
+  const groupHint = document.getElementById('groupHint');
   const resetBtn = document.getElementById('resetBtn');
   const devBar = document.getElementById('devBar');
   const devStateSelect = document.getElementById('devStateSelect');
@@ -579,12 +586,31 @@
 
     setDevMode(display.dev_mode === true);
     setServiceClosed(display.service || null);
+    showReceivingGroup(display.groups || null);
 
     if (backgroundMode !== 'sync') return;
     const theme = SYNC_FALLBACK[display.theme] || display.theme;
     if (scene.setTheme(theme)) {
       logEvent({ event: 'background:theme', message: `背景を ${theme} に合わせた` });
     }
+  }
+
+  /**
+   * いま受付中の組を、係員の行に出す。
+   * 係員用の画面で人数を押すまでは「組なし」のまま。
+   * @param {{queue: Array<{label: number, size: number, captured: number}>}|null} groups
+   */
+  function showReceivingGroup(groups) {
+    const queue = groups && Array.isArray(groups.queue) ? groups.queue : [];
+    const receiving = queue.length > 0 ? queue[queue.length - 1] : null;
+    if (!receiving) {
+      groupHint.textContent = '組なし';
+      groupHint.classList.remove('is-over');
+      return;
+    }
+    groupHint.textContent = `${receiving.label}組 ${receiving.captured}/${receiving.size}人`;
+    // 予定より多い＝次の組の受付がまだ始まっていない
+    groupHint.classList.toggle('is-over', receiving.captured >= receiving.size);
   }
 
   /**

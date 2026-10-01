@@ -414,6 +414,18 @@ async function run() {
       });
       noUser.status === 401 ? ok('誤ったユーザー名は通らない') : bad('誤ったユーザー名で通ってしまう', `${noUser.status}`);
 
+      /*
+       * 組の操作は認証の中にあるか。
+       * 外から押せると、展示中に組を飛ばされて来場者の結果が消える。
+       */
+      for (const p of ['/api/groups', '/api/groups/size', '/api/groups/skip']) {
+        const r3 = await req(p, {
+          auth: false, method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: '{"size":1}'
+        });
+        r3.status === 401 ? ok(`認証なしでは組を触れない (${p})`) : bad(`認証なしで組を触れてしまう (${p})`, `${r3.status}`);
+      }
+
       // 認証の形を崩したもの
       for (const [label, value] of [
         ['空のBasic', 'Basic '],
@@ -469,7 +481,8 @@ async function run() {
   // ---- 4. 他所のページからの操作(CSRF) ----
   section(4, '他所のページからの操作(CSRF)');
   {
-    for (const p of ['/api/display/advance', '/api/display/clear', '/api/display/updates', '/api/dev', '/api/service']) {
+    for (const p of ['/api/display/advance', '/api/display/clear', '/api/display/updates', '/api/dev', '/api/service',
+      '/api/groups', '/api/groups/size', '/api/groups/skip']) {
       const r = await req(p, { method: 'POST', crossSite: true });
       r.status === 403 ? ok(`他所からのPOSTを断る (${p})`) : bad(`他所からのPOSTを断っていない (${p})`, `${r.status}`);
     }
@@ -601,6 +614,36 @@ async function run() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body
       });
       r.status === expect ? ok(`受付終了の値を検証する (${label})`, `${r.status}`) : bad(`受付終了の値を検証していない (${label})`, `${r.status} 本文${body}`);
+    }
+
+    /*
+     * 受付した組の人数。
+     *
+     * ここは**作らない確認だけ**にしてある。組を1つ作ると、以後その組に
+     * 本物の受付が入ってしまい、開場中に流すと運用そのものを壊すため。
+     * 型の取り違えで通ってしまわないかだけを見る(true が 1人の組に
+     * ならないか、など)。
+     */
+    for (const [label, body] of [
+      ['組の人数が0', '{"size":0}'],
+      ['組の人数が上限超', '{"size":7}'],
+      ['組の人数が負', '{"size":-1}'],
+      ['組の人数が小数', '{"size":2.5}'],
+      ['組の人数が文字列', '{"size":"3"}'],
+      ['組の人数がtrue', '{"size":true}'],
+      ['組の人数が配列', '{"size":[3]}'],
+      ['組の人数がInfinity相当', '{"size":1e999}'],
+      ['組の人数が無い', '{}']
+    ]) {
+      for (const path of ['/api/groups', '/api/groups/size']) {
+        const r = await req(path, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body
+        });
+        // 受付中の組が無ければ /api/groups/size は 409。どちらも「作られていない」
+        [400, 409].includes(r.status)
+          ? ok(`組の人数を検証する (${label})`, `${path} → ${r.status}`)
+          : bad('組の人数を検証していない', `${path} ${body} → ${r.status}`);
+      }
     }
 
     for (const [label, body, expect] of [
