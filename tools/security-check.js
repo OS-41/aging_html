@@ -36,12 +36,25 @@
  * 色を消したいときは NO_COLOR=1 を付ける。
  */
 
-const BASE = (process.argv[2] || '').replace(/\/+$/, '');
-const USER = process.argv[3] || '';
-const PASS = process.argv[4] || '';
+const ARGS = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const FLAGS = process.argv.slice(2).filter((a) => a.startsWith('--'));
+const BASE = (ARGS[0] || '').replace(/\/+$/, '');
+const USER = ARGS[1] || '';
+const PASS = ARGS[2] || '';
+
+/*
+ * --rate-limit を付けたときだけ、受付の速さの上限を確かめる。
+ *
+ * 既定で入れていないのは、確かめるのに上限いっぱいまで写真を送る必要があり、
+ * そのあと最大1分間、本物の撮影も断られるようになるため。設営中に
+ * うっかり流すと「撮影ブースが受け付けない」という事故になる。
+ * 一度だけ確かめたいときに、意識して付けてもらう。
+ */
+const CHECK_RATE_LIMIT = FLAGS.includes('--rate-limit');
 
 if (!BASE) {
-  console.error('使い方: node tools/security-check.js <入口のURL> <ユーザー> <パスワード>');
+  console.error('使い方: node tools/security-check.js <入口のURL> <ユーザー> <パスワード> [--rate-limit]');
+  console.error('  --rate-limit … 受付の速さの上限も確かめる(そのあと最大1分、撮影が断られます)');
   process.exit(2);
 }
 
@@ -179,8 +192,14 @@ async function req(path, options = {}) {
   try {
     const res = await fetch(url, { method, headers: h, body, redirect });
     const text = await res.text();
-    if (CDN_THROTTLED.includes(res.status)) countThrottle();
-    return { status: res.status, headers: res.headers, text, json: safeJson(text) };
+    const json = safeJson(text);
+    if (CDN_THROTTLED.includes(res.status)) {
+      // このサーバー自身の受付上限は、JSONで自分の言葉を返してくる。
+      // 前段に絞られた場合はこの形にならない
+      lastThrottleFrom = json?.error ? 'app' : 'cdn';
+      if (lastThrottleFrom === 'cdn') countThrottle();
+    }
+    return { status: res.status, headers: res.headers, text, json };
   } catch (err) {
     return { status: 0, headers: new Headers(), text: String(err), json: null, error: err };
   }
@@ -190,6 +209,7 @@ async function req(path, options = {}) {
 function countThrottle() {
   throttledCount += 1;
   if (throttledCount < THROTTLE_ABORT_AT || abortedByThrottle) return;
+  // 以下、前段に絞られた場合だけ到達する(自分の受付上限では中断しない)
   abortedByThrottle = true;
   clearBar();
   console.error(`\n${yellow('前段(CDN)に絞られたため、途中で止めました')}`);
@@ -247,8 +267,22 @@ let throttledCount = 0;
  */
 const THROTTLE_ABORT_AT = 5;
 let abortedByThrottle = false;
+/*
+ * 429がどこから来たか。
+ *  'app' … このサーバー自身の受付上限(aging APIの利用枠を守るためのもの)。
+ *          短い間にこの確認を流し直すと当たる。異常ではない
+ *  'cdn' … 前段に絞られた。続けても結果が当てにならない
+ * 要求は順に出しているので、直前の1件を覚えておけば取り違えない。
+ */
+let lastThrottleFrom = 'cdn';
 
 function noteThrottled(name, status, note) {
+  if (lastThrottleFrom === 'app') {
+    return hmm(`${name}（確かめられず）`,
+      `このサーバーの受付上限に当たった(${status})。`
+      + '短い間に流し直すと当たります。1分ほど置いてから流し直してください'
+      + `${note ? ` / ${note}` : ''}`);
+  }
   throttledCount += 1;
   return hmm(`${name}（確かめられず）`, `前段(CDN)に絞られた(${status})。しばらく置いて流し直す${note ? ` / ${note}` : ''}`);
 }
@@ -973,6 +1007,28 @@ async function run() {
         ? ok('Content-Security-Policy がある', csp.slice(0, 70))
         : hmm('Content-Security-Policy が無い', '万一の持ち出しを止める上乗せが無い');
     }
+  }
+
+  // ---- 17の手前. 受付の速さの上限(--rate-limit のときだけ) ----
+  if (devMode && CHECK_RATE_LIMIT) {
+    doing('上限に当たるまで写真を送ります。このあと最大1分、撮影が断られます');
+    let accepted = 0;
+    let throttled = 0;
+    for (let i = 0; i < 60; i++) {
+      const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG) });
+      if (r.status === 201) { accepted += 1; await dropEntry(r.json); }
+      else if (r.status === 429) { throttled += 1; if (throttled >= 3) break; }
+      else break;
+    }
+    if (throttled && accepted === 0) {
+      ok('受付の速さに上限がある', 'すでに上限に達していた(直前の確認で使い切ったぶん) — 1分置くと戻ります');
+    } else if (throttled) {
+      ok('受付の速さに上限がある', `${accepted}件で止まり、以後は429 — aging APIの利用枠を守れる`);
+    } else {
+      bad('受付の速さに上限が無い', `${accepted}件を続けて受け付けた — 資格情報が漏れると利用枠を一気に減らされる`);
+    }
+  } else if (devMode) {
+    line(dim('       受付の速さの上限は確かめていません(--rate-limit を付けると確かめます)'));
   }
 
   // ---- 17. 送った写真を残していないか ----
