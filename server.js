@@ -24,8 +24,11 @@
  *   DELETE /api/entries/:id                   受付を取り消す(係員用)
  *   GET    /api/entries/:id/images/:index     取り込み済みの結果画像
  *   GET    /api/display                       閲覧ブースに映している内容
- *   POST   /api/display/advance               次のDISPLAY_SLOT_COUNT人分に入れ替える(係員用)
+ *   POST   /api/display/advance               次の組(組が無ければ古い順)に入れ替える(係員用)
  *   POST   /api/display/clear                 表示を消す(係員用)
+ *   POST   /api/groups                        受付した組の人数を預かる(係員用)
+ *   POST   /api/groups/size                   受付中の組の人数を直す(係員用)
+ *   POST   /api/groups/skip                   先頭の組を出さずに取り下げる(係員用)
  *   GET    /api/logs                          処理履歴(サーバー・クライアント双方)
  *   POST   /api/logs                          クライアントからの履歴を記録する
  *   GET    /api/status                        各ブース・aging API・サーバーの状況
@@ -564,6 +567,105 @@ function allowNewEntry() {
 const DISPLAY_SLOT_COUNT = 6;
 
 /*
+ * ---- 受付した組(グループ) ----
+ *
+ * 来場者は最大6人の組で動き、**受付 → 別アトラクション → 閲覧** の3つの
+ * エリアを順に進む。エリアは物理的に区切られていて組が混ざることはなく、
+ * 常にそれぞれのエリアに別の組がいる。
+ *
+ *   受付: ③   別アトラクション: ②   閲覧: ①
+ *   ↓ 別アトラクションが終わると、全員が1つ先へ動く
+ *   受付: ④   別アトラクション: ③   閲覧: ②
+ *
+ * ここで困るのが、**組の人数と撮影する人数が一致しない**こと。
+ * 6人の組でも撮りたい人が3人だけ、ということが起きる。
+ * 「未表示の古い順に6人」で出していると、その3人のうしろに次の組の
+ * 写真が3枚くっついてきて、**まだ閲覧ブースに来ていない人の結果が
+ * 先に映ってしまう**。
+ *
+ * そこで、受付の時点で係員に「この組で撮影するのは何人か」を押してもらい、
+ * それ以降の写真をその組のものとして預かる。閲覧ブースへ出すときは
+ * 先頭の組のぶんだけを出し、その組をキューから取り除く。
+ *
+ * **キューは3つまで**。②が閲覧ブースに着くころには③・④の撮影が
+ * 終わっているので、②の人数を2組ぶん先まで覚えておく必要がある。
+ * 逆に4つ目が必要になるのは、先頭の組を出し忘れているときだけなので、
+ * そのときは受付を止めて気づいてもらう。
+ *
+ * 組を1つも登録していないときは、今までどおり「未表示の古い順に6人」で
+ * 動く。朝の試運転や、この仕組みを使わない運用でも止まらないようにするため。
+ */
+const MAX_PENDING_GROUPS = 3;
+const MAX_GROUP_SIZE = DISPLAY_SLOT_COUNT;
+
+// 組の通し番号(係員が口頭で指せるように、1から順に振る)
+let groupSequence = 0;
+
+// 受付した順の待ち行列。**先頭が次に閲覧ブースへ出す組**、末尾が受付中の組。
+// { id, label, size, openedAtMs, entryIds: string[] }
+const groupQueue = [];
+
+/** いま受付中の組(これから届く写真が入る組)。登録が無ければ null */
+function receivingGroup() {
+  return groupQueue.length > 0 ? groupQueue[groupQueue.length - 1] : null;
+}
+
+/** 次に閲覧ブースへ出す組。預かっている組が無ければ null */
+function headGroup() {
+  return groupQueue.length > 0 ? groupQueue[0] : null;
+}
+
+/** その組の受付を撮影の古い順で返す。期限切れで消えたものは落とす */
+function groupEntries(group) {
+  return group.entryIds
+    .map((entryId) => entryStore.get(entryId))
+    .filter(Boolean)
+    .sort((a, b) => a.capturedAtMs - b.capturedAtMs);
+}
+
+/** 係員画面に渡す形へ。index 0 が次に出す組 */
+function toPublicGroup(group, index) {
+  const members = groupEntries(group);
+  return {
+    id: group.id,
+    label: group.label,
+    size: group.size,
+    position: index,
+    // 受付中の組かどうか(次に届く写真が入る組)
+    receiving: index === groupQueue.length - 1,
+    captured: members.length,
+    ready: members.filter((entry) => entry.status === 'ready' && !entry.viewedAtMs).length,
+    processing: members.filter((entry) => entry.status === 'processing').length,
+    failed: members.filter((entry) => entry.status === 'error').length,
+    sequences: members.map((entry) => entry.sequence),
+    opened_at: new Date(group.openedAtMs).toISOString()
+  };
+}
+
+/** 預かっている組の一覧と、どの組にも入っていない未表示の数 */
+function groupsState() {
+  const inGroup = new Set();
+  for (const group of groupQueue) {
+    for (const entryId of group.entryIds) inGroup.add(entryId);
+  }
+  /*
+   * どの組にも属さない未表示。朝の試し撮りや、組を登録する前に
+   * 撮ってしまったぶんがここに出る。放っておくと次の組に混ざるので、
+   * 係員画面に数を出して気づけるようにする。
+   */
+  const ungrouped = [...entryStore.values()]
+    .filter((entry) => !inGroup.has(entry.id) && entry.status === 'ready' && !entry.viewedAtMs)
+    .length;
+
+  return {
+    max: MAX_PENDING_GROUPS,
+    max_size: MAX_GROUP_SIZE,
+    queue: groupQueue.map(toPublicGroup),
+    ungrouped_waiting: ungrouped
+  };
+}
+
+/*
  * 取り込む結果画像の年齢。
  *
  * aging APIは複数の年齢を返すが、閲覧ブースで見せるのは1枚だけなので、
@@ -920,6 +1022,22 @@ setInterval(() => {
       deleteEntry(entryId);
     }
   }
+  /*
+   * 中身が無くなって時間も経った組は取り下げる。
+   * 出し忘れた組が先頭に残ったままだと、以後どの組も出せなくなるため
+   * (係員の「この組を飛ばす」を押さなくても、放っておけば直る)。
+   */
+  for (let i = groupQueue.length - 1; i >= 0; i -= 1) {
+    const group = groupQueue[i];
+    if (group.openedAtMs < expiry && groupEntries(group).length === 0) {
+      groupQueue.splice(i, 1);
+      addLog({
+        level: 'warn',
+        event: 'group:expired',
+        message: `${group.label}組は写真が無いまま時間が経ったため取り下げました`
+      });
+    }
+  }
 }, 60 * 1000).unref();
 
 /**
@@ -985,6 +1103,8 @@ function currentDisplay() {
     dev_placeholder_count: devPlaceholderCount,
     theme: displayTheme,
     themes: DISPLAY_THEMES,
+    // 預かっている組。係員画面はこれを見て「次に出す組」を出す
+    groups: groupsState(),
     // 本日の受付を終えたか。撮影ブースと閲覧ブースはこれを見て掲示を出す
     service: serviceState(),
     entries
@@ -1004,6 +1124,8 @@ function toPublicEntry(entry) {
   return {
     id: entry.id,
     sequence: entry.sequence,
+    // どの組で撮ったか(組を使っていなければ null)
+    group: entry.groupLabel ?? null,
     status: entry.status,
     error: entry.error,
     error_code: entry.errorCode,
@@ -1579,9 +1701,36 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       ageIdx: null,
       ageMin: null,
       ageMax: null,
-      viewedAtMs: null
+      viewedAtMs: null,
+      // どの組の写真か。組を登録していなければ null のまま
+      groupId: null,
+      groupLabel: null
     };
     entryStore.set(entry.id, entry);
+
+    /*
+     * 受付中の組に入れる。この紐づけだけが、閲覧ブースで
+     * 次の組の写真が混ざらないことを保証している。
+     */
+    const group = receivingGroup();
+    if (group) {
+      entry.groupId = group.id;
+      entry.groupLabel = group.label;
+      group.entryIds.push(entry.id);
+      if (group.entryIds.length > group.size) {
+        /*
+         * 予定より多く撮った。写真は受け取る(来場者はもう撮り終えている)が、
+         * 次の組の受付を始め忘れている可能性が高いので、はっきり残す。
+         */
+        addLog({
+          level: 'warn',
+          event: 'group:over',
+          echo: true,
+          message: `${group.label}組は${group.size}人の予定ですが${group.entryIds.length}人目を受け付けました`
+            + '(次の組の受付を始め忘れていないか確かめてください)'
+        });
+      }
+    }
 
     addLog({ event: 'entry:created', status: 201, sequence: entry.sequence, message: `${req.file.size}バイトを受信` });
 
@@ -1645,8 +1794,12 @@ router.get('/api/display', requireBasicAuth, revalidate, (req, res) => {
 
 /**
  * POST /api/display/advance
- * 未表示のうち古い順に DISPLAY_SLOT_COUNT 人分を画面に載せ替え、
  * 閲覧ブースを結果画面に切り替える(係員の「結果画面に移行」)。
+ *
+ * 組を預かっているときは**先頭の組のぶんだけ**を出し、その組を取り除く。
+ * 組を1つも登録していないときだけ、未表示の古い順に DISPLAY_SLOT_COUNT 人分を出す。
+ *
+ * body: { "force": true }  加工がまだ終わっていない人を置いて、届いているぶんで出す
  */
 router.post('/api/display/advance', requireBasicAuth, (req, res) => {
   if (!displayUpdatesEnabled) {
@@ -1654,9 +1807,59 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     return res.status(409).json({ error: '閲覧ブースの更新が無効になっています', ...currentDisplay() });
   }
 
-  const next = entriesInOrder()
-    .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
-    .slice(0, DISPLAY_SLOT_COUNT);
+  const force = req.body?.force === true;
+  const group = headGroup();
+  let next;
+  let overflow = [];
+
+  if (group) {
+    const members = groupEntries(group);
+    const ready = members.filter((entry) => entry.status === 'ready' && !entry.viewedAtMs);
+    const processing = members.filter((entry) => entry.status === 'processing').length;
+
+    /*
+     * 空の結果画面を出してしまわない。全員失敗した組や、まだ1人も
+     * 撮っていない組は「この組を飛ばす」で取り除いてもらう
+     * (ここで勝手に取り除くと、撮影中の組を消してしまいかねない)。
+     */
+    if (ready.length === 0) {
+      addLog({
+        level: 'warn',
+        event: 'display:advance',
+        message: `${group.label}組には出せる写真がありません(撮影 ${members.length}人 / 加工中 ${processing}人)`
+      });
+      return res.status(409).json({
+        error: `${group.label}組には、いま出せる写真がありません`,
+        reason: 'group_empty',
+        ...currentDisplay()
+      });
+    }
+    // 加工待ちを置いていくと、その人の結果は二度と出せない。必ず確認を取る
+    if (processing > 0 && !force) {
+      return res.status(409).json({
+        error: `${group.label}組は、まだ${processing}人分の加工が終わっていません`,
+        reason: 'group_processing',
+        group: toPublicGroup(group, 0),
+        ...currentDisplay()
+      });
+    }
+
+    next = ready.slice(0, DISPLAY_SLOT_COUNT);
+    // 画面に入りきらないぶん。次の組に混ざらないよう、ここで終わりにする
+    overflow = ready.slice(DISPLAY_SLOT_COUNT);
+    groupQueue.shift();
+    addLog({
+      level: processing > 0 || overflow.length > 0 ? 'warn' : 'info',
+      event: 'group:shown',
+      message: `${group.label}組(予定${group.size}人)を出します: ${next.length}人`
+        + (processing > 0 ? ` / 加工待ち${processing}人を置いていきます` : '')
+        + (overflow.length > 0 ? ` / 画面に入らない${overflow.length}人は出しません` : '')
+    });
+  } else {
+    next = entriesInOrder()
+      .filter((entry) => entry.status === 'ready' && !entry.viewedAtMs)
+      .slice(0, DISPLAY_SLOT_COUNT);
+  }
 
   // 開発モードでは、足りないぶんを見本で埋めて結果画面を出せる。
   // 通常は1件も無ければ何もしない(誤って空の結果画面を出さないため)。
@@ -1667,6 +1870,9 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
 
   const now = Date.now();
   for (const entry of next) {
+    entry.viewedAtMs = now;
+  }
+  for (const entry of overflow) {
     entry.viewedAtMs = now;
   }
   displayBatch = next.map((entry) => entry.id);
@@ -1686,6 +1892,113 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     level: displayPlaceholders > 0 ? 'warn' : 'info',
     event: 'display:advance',
     message: displayPlaceholders > 0 ? `${shown}(開発モード: 見本 ${displayPlaceholders}件を追加)` : shown
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/groups
+ * 受付した組を1つ預かる(係員が受付で人数を押したとき)。
+ * これ以降に届く写真は、この組のものとして預かる。
+ * body: { "size": 1〜MAX_GROUP_SIZE }  その組で**撮影する**人数
+ */
+router.post('/api/groups', requireBasicAuth, (req, res) => {
+  const wanted = req.body?.size;
+  /*
+   * 人数上限と同じ理由で、数で送られてきたかを見る。
+   * Number() に通すだけだと true が 1 に化け、1人の組として通ってしまう。
+   */
+  if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_GROUP_SIZE) {
+    return res.status(400).json({ error: `size は 1〜${MAX_GROUP_SIZE} の整数(数値)で指定してください` });
+  }
+  if (groupQueue.length >= MAX_PENDING_GROUPS) {
+    const head = groupQueue[0];
+    addLog({
+      level: 'warn',
+      event: 'group:full',
+      echo: true,
+      message: `組を${MAX_PENDING_GROUPS}つ預かっているため受付を始められません(先頭は${head.label}組)`
+    });
+    return res.status(409).json({
+      error: `組は${MAX_PENDING_GROUPS}つまでしか預かれません。`
+        + `先に${head.label}組を「結果画面に移行」で出すか、「この組を飛ばす」で取り下げてください`,
+      reason: 'group_queue_full',
+      ...currentDisplay()
+    });
+  }
+
+  groupSequence += 1;
+  groupQueue.push({
+    id: randomUUID(),
+    label: groupSequence,
+    size: wanted,
+    openedAtMs: Date.now(),
+    entryIds: []
+  });
+  addLog({
+    event: 'group:opened',
+    echo: true,
+    message: `${groupSequence}組の受付を始めました(撮影する人 ${wanted}人)`
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/groups/size
+ * 受付中の組の人数を入れ直す(押し間違えたとき)。
+ * すでに預かっている写真の所属は変えない。
+ * body: { "size": 1〜MAX_GROUP_SIZE }
+ */
+router.post('/api/groups/size', requireBasicAuth, (req, res) => {
+  const wanted = req.body?.size;
+  if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_GROUP_SIZE) {
+    return res.status(400).json({ error: `size は 1〜${MAX_GROUP_SIZE} の整数(数値)で指定してください` });
+  }
+  const group = receivingGroup();
+  if (!group) {
+    return res.status(409).json({ error: '受付中の組がありません', ...currentDisplay() });
+  }
+
+  const before = group.size;
+  group.size = wanted;
+  addLog({
+    level: 'warn',
+    event: 'group:resized',
+    echo: true,
+    message: `${group.label}組の人数を ${before}人 から ${wanted}人 に直しました`
+  });
+  res.json(currentDisplay());
+});
+
+/**
+ * POST /api/groups/skip
+ * 先頭の組を、閲覧ブースに出さずに取り下げる(係員の「この組を飛ばす」)。
+ *
+ * 全員の撮影が失敗した組や、撮らずに通り過ぎた組を取り除くための逃げ道。
+ * これが無いと、出せない組が先頭に残って以後どの組も出せなくなる。
+ * その組の写真は未表示のまま残さない(次の組に混ざらないようにするため)。
+ */
+router.post('/api/groups/skip', requireBasicAuth, (req, res) => {
+  const group = groupQueue.shift();
+  if (!group) {
+    return res.status(409).json({ error: '預かっている組がありません', ...currentDisplay() });
+  }
+
+  const now = Date.now();
+  const members = groupEntries(group);
+  let dropped = 0;
+  for (const entry of members) {
+    if (!entry.viewedAtMs) {
+      entry.viewedAtMs = now;
+      dropped += 1;
+    }
+  }
+  addLog({
+    level: 'warn',
+    event: 'group:skipped',
+    echo: true,
+    message: `${group.label}組(予定${group.size}人)を閲覧ブースに出さずに取り下げました`
+      + `(未表示だった${dropped}人分は、以後出てきません)`
   });
   res.json(currentDisplay());
 });

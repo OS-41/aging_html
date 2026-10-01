@@ -494,6 +494,67 @@
   }
 
   /*
+   * 受付した組まわり。
+   *
+   * 受付でここを押すと、以後の写真がその組のものになる。
+   * 「結果画面に移行」が何を出すかを決める欄なので、その真上に置く。
+   */
+  .group-block {
+    margin: 0 0 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .group-sizes {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .group-sizes .label {
+    font-size: 13px;
+    color: var(--muted);
+    margin-right: 4px;
+  }
+  /* 受付は立ったまま素早く押すので、数字のボタンは大きめに取る */
+  .group-sizes button {
+    min-width: 54px;
+    font-variant-numeric: tabular-nums;
+  }
+  .group-queue {
+    display: grid;
+    gap: 6px;
+    margin: 12px 0 0;
+  }
+  .group-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--surface-sunk);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  /* 次に出す組。ここだけ色を変えて、どれが対象かを一目で分かるようにする */
+  .group-row.is-next {
+    background: #1b2b3a;
+    color: var(--ink);
+  }
+  .group-row .who {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .group-row .counts { font-variant-numeric: tabular-nums; }
+  .group-empty {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 12px 0 0;
+  }
+
+  /*
    * 本日の受付終了まわり。
    *
    * ここを押すと来場者向けの2画面が両方とも掲示に変わるため、
@@ -597,11 +658,39 @@
         <summary><h2>表示の制御</h2></summary>
       <div class="panel-body">
       <p class="hint">
-        「結果画面に移行」で、まだ表示していない古い順に<b>最大<span id="slotCountHint">—</span>人分</b>を
-        まとめて閲覧ブースへ出します。未表示がそれより少なければ、その人数ぶんだけを並べます
-        （4人なら4枚で画面を使い切ります）。
+        「結果画面に移行」で、<b>次に出す組のぶんだけ</b>をまとめて閲覧ブースへ出します
+        （4人なら4枚で画面を使い切ります。1組は最大<span id="slotCountHint">—</span>人）。
         「待機画面に移行」に戻すと、閲覧ブースは背景の演出だけになります。
       </p>
+
+      <!--
+        受付した組。
+        組を1つも預かっていないときは、今までどおり「未表示の古い順に最大6人」で出す。
+      -->
+      <div class="group-block">
+        <p class="hint" style="margin-bottom:10px">
+          受付で、<b>その組で撮影する人数</b>を押します。以後の写真はその組のものとして預かり、
+          「結果画面に移行」では<b>その組のぶんだけ</b>が出ます
+          （6人の組で撮るのが3人でも、次の組の写真が混ざりません）。
+          受付・別アトラクション・閲覧の<b>3組ぶんまで</b>預かれます。
+          <b>1組も押していないあいだは、未表示の古い順に最大6人</b>で出ます。
+        </p>
+        <div class="group-sizes" id="groupSizeRow">
+          <span class="label">この組で撮影する人数</span>
+          <button type="button" class="quiet" data-group-size="1">1人</button>
+          <button type="button" class="quiet" data-group-size="2">2人</button>
+          <button type="button" class="quiet" data-group-size="3">3人</button>
+          <button type="button" class="quiet" data-group-size="4">4人</button>
+          <button type="button" class="quiet" data-group-size="5">5人</button>
+          <button type="button" class="quiet" data-group-size="6">6人</button>
+        </div>
+        <div class="group-queue" id="groupQueue"></div>
+        <p class="group-empty" id="groupNote"></p>
+        <div class="control-row" style="margin-top:10px">
+          <button type="button" class="quiet" id="groupSizeFixBtn">受付中の組の人数を直す</button>
+          <button type="button" class="quiet" id="groupSkipBtn">この組を飛ばす</button>
+        </div>
+      </div>
 
       <p class="now-showing" id="devCountRow" hidden>
         見本で埋める人数
@@ -720,7 +809,7 @@
         <table>
           <thead>
             <tr>
-              <th>番号</th><th>撮影時刻</th><th>状態</th><th>ファイル名</th><th></th>
+              <th>番号</th><th>組</th><th>撮影時刻</th><th>状態</th><th>ファイル名</th><th></th>
             </tr>
           </thead>
           <tbody id="entryRows"></tbody>
@@ -784,6 +873,11 @@
   const limitApplyBtn = document.getElementById('limitApplyBtn');
   const limitClearBtn = document.getElementById('limitClearBtn');
   const serviceNote = document.getElementById('serviceNote');
+  const groupSizeRow = document.getElementById('groupSizeRow');
+  const groupQueueEl = document.getElementById('groupQueue');
+  const groupNote = document.getElementById('groupNote');
+  const groupSkipBtn = document.getElementById('groupSkipBtn');
+  const groupSizeFixBtn = document.getElementById('groupSizeFixBtn');
   const reloadBtn = document.getElementById('reloadBtn');
   const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
@@ -931,6 +1025,11 @@
       seq.className = 'mono';
       seq.textContent = String(entry.sequence);
 
+      // どの組で撮ったか。組を使っていない受付(試し撮りなど)は「—」
+      const group = document.createElement('td');
+      group.className = 'mono';
+      group.textContent = entry.group === null || entry.group === undefined ? '—' : `${entry.group}組`;
+
       const at = document.createElement('td');
       at.className = 'mono';
       at.textContent = timeText(entry.captured_at);
@@ -974,7 +1073,7 @@
       });
       action.append(del);
 
-      tr.append(seq, at, state, files, action);
+      tr.append(seq, group, at, state, files, action);
       return tr;
     });
     entryRows.replaceChildren(...rows);
@@ -1239,16 +1338,24 @@
      * 開発モードでも、実際の受付があるときは本番と同じ人数で出る。
      * 見本が出るのは受付が1件も無いときだけ。
      */
-    const realCount = Math.min(waitingEntries, display.slot_count);
-    const sampleOnly = devMode && realCount === 0;
+    const groups = display.groups || null;
+    const head = groups && groups.queue.length > 0 ? groups.queue[0] : null;
+    // 組を預かっているときは、その組のぶんだけが出る。
+    // 預かっていないときだけ、今までどおり未表示の古い順になる
+    const realCount = head ? head.ready : Math.min(waitingEntries, display.slot_count);
+    const sampleOnly = devMode && realCount === 0 && !head;
     const nextCount = sampleOnly
       ? (Number(devCountSelect.value) || display.slot_count)
-      : realCount;
+      : Math.min(realCount, display.slot_count);
     if (sampleOnly) advanceBtn.textContent = `結果画面に移行（見本${nextCount}人）`;
+    else if (head && nextCount === 0) advanceBtn.textContent = `結果画面に移行（${head.label}組は0人）`;
+    else if (head && head.processing > 0) advanceBtn.textContent = `結果画面に移行（${head.label}組 ${nextCount}人／加工待ち${head.processing}人）`;
+    else if (head) advanceBtn.textContent = `結果画面に移行（${head.label}組の${nextCount}人）`;
     else if (nextCount === 0) advanceBtn.textContent = '結果画面に移行（未表示なし）';
     else advanceBtn.textContent = `結果画面に移行（次の${nextCount}人）`;
     // 出せる人がいないときは押しても何も起きないので、押せなくしておく
-    advanceBtn.disabled = !updatesEnabled || (!devMode && nextCount === 0);
+    advanceBtn.disabled = !updatesEnabled || (!devMode && nextCount === 0) || (!!head && nextCount === 0);
+    renderGroups(groups);
     // 今どちらの画面が出ているかを取り違えないよう、状態をそのまま出す
     displayModeEl.textContent = showingResults ? '結果画面' : '待機画面';
     advanceBtn.classList.toggle('primary', !showingResults);
@@ -1261,6 +1368,84 @@
       themeSelect.value = display.theme;
     }
     renderService(display.service || null);
+  }
+
+  /**
+   * 預かっている組を画面に出す。先頭が次に閲覧ブースへ出る組。
+   * @param {{max: number, max_size: number, ungrouped_waiting: number,
+   *          queue: Array<object>}|null} groups
+   */
+  function renderGroups(groups) {
+    if (!groups) return;
+    groupQueueState = groups;
+
+    const queue = groups.queue || [];
+    for (const button of groupSizeRow.querySelectorAll('button[data-group-size]')) {
+      // 3組預かっているあいだは受付を始められない(先に先頭を出してもらう)
+      button.disabled = queue.length >= groups.max;
+    }
+    groupSkipBtn.disabled = queue.length === 0;
+    groupSizeFixBtn.disabled = queue.length === 0;
+
+    groupQueueEl.replaceChildren(...queue.map((group, index) => {
+      const row = document.createElement('div');
+      row.className = index === 0 ? 'group-row is-next' : 'group-row';
+
+      const who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = `${group.label}組`;
+      row.append(who);
+
+      /*
+       * どのエリアにいる組かを添える。3組そろっていれば
+       * 先頭=閲覧・真ん中=別アトラクション・末尾=受付 に対応する。
+       */
+      const where = document.createElement('span');
+      where.className = 'tag ' + (index === 0 ? 'tag-ready' : (group.receiving ? 'tag-processing' : 'tag-viewed'));
+      where.textContent = index === 0
+        ? (group.receiving ? '次に出す・受付中' : '次に出す')
+        : (group.receiving ? '受付中' : '移動中');
+      row.append(where);
+
+      const counts = document.createElement('span');
+      counts.className = 'counts';
+      counts.textContent = `予定 ${group.size}人 ／ 撮影 ${group.captured}人 ／ 出せる ${group.ready}人`
+        + (group.processing > 0 ? ` ／ 加工待ち ${group.processing}人` : '')
+        + (group.failed > 0 ? ` ／ 失敗 ${group.failed}人` : '');
+      row.append(counts);
+
+      // 予定より多く撮っている＝次の組の受付を始め忘れている可能性が高い
+      if (group.captured > group.size) {
+        const over = document.createElement('b');
+        over.className = 'level-warn';
+        over.textContent = '予定より多く撮っています';
+        row.append(over);
+      }
+      if (group.sequences.length > 0) {
+        const nums = document.createElement('span');
+        nums.className = 'mono';
+        nums.textContent = `番号 ${group.sequences.join(', ')}`;
+        row.append(nums);
+      }
+      return row;
+    }));
+
+    const parts = [];
+    if (queue.length === 0) {
+      parts.push('組を預かっていません。この状態では、未表示の古い順に最大'
+        + `${groups.max_size}人をまとめて出します。`);
+    } else {
+      parts.push(`${queue.length}／${groups.max}組を預かっています。`);
+    }
+    groupNote.replaceChildren(parts.join(''));
+    // 組に入っていない未表示は、放っておくと次の組のうしろにつく
+    if (groups.ungrouped_waiting > 0 && queue.length > 0) {
+      const warn = document.createElement('b');
+      warn.className = 'level-warn';
+      warn.textContent = `　どの組にも入っていない未表示が${groups.ungrouped_waiting}人分あります`
+        + '（試し撮りなら「保管中の写真」から削除してください）。';
+      groupNote.append(warn);
+    }
   }
 
   /**
@@ -1409,6 +1594,8 @@
   // サーバーの値で毎回上書きする
   let serviceClosed = false;
   let serviceLimit = null;
+  // 直近に受け取った組の状態(確認の文言を組み立てるのに使う)
+  let groupQueueState = null;
 
   /**
    * 締め切りの設定を送り、返ってきた状態で画面を書き換える。
@@ -1481,6 +1668,83 @@
     }
   });
 
+  /**
+   * 組の操作を送って、画面を取り直す。
+   * @param {string} apiPath
+   * @param {object|null} body
+   * @param {HTMLButtonElement[]} buttons 送信中だけ押せなくするボタン
+   */
+  async function postGroup(apiPath, body, buttons) {
+    for (const button of buttons) button.disabled = true;
+    try {
+      renderDisplay(await callApi(apiPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {})
+      }));
+      await refresh();
+    } catch (err) {
+      alert(`できませんでした。${err.message}`);
+      await refresh();
+    } finally {
+      for (const button of buttons) button.disabled = false;
+    }
+  }
+
+  // 受付でその組の撮影人数を押す。以後の写真はこの組のものになる
+  groupSizeRow.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-group-size]');
+    if (!button || button.disabled) return;
+    const size = Number(button.dataset.groupSize);
+    const queue = groupQueueState ? groupQueueState.queue : [];
+    const receiving = queue.length > 0 ? queue[queue.length - 1] : null;
+    /*
+     * 受付中の組にまだ1枚も届いていないのに次の組を始めるのは、
+     * 押し間違い(人数を直したかった)の可能性が高いので確かめる。
+     */
+    if (receiving && receiving.captured === 0 && !confirm(
+      `${receiving.label}組はまだ1人も撮影していません。\n\n`
+      + `このまま新しい組（${size}人）の受付を始めますか?\n`
+      + `${receiving.label}組の人数を直したいだけなら「キャンセル」を押し、`
+      + '「受付中の組の人数を直す」を使ってください。'
+    )) return;
+    postGroup('/api/groups', { size }, [...groupSizeRow.querySelectorAll('button')]);
+  });
+
+  // 押し間違えたときに、受付中の組の人数だけを入れ直す
+  groupSizeFixBtn.addEventListener('click', () => {
+    const queue = groupQueueState ? groupQueueState.queue : [];
+    const receiving = queue.length > 0 ? queue[queue.length - 1] : null;
+    if (!receiving) return;
+    const answer = prompt(
+      `${receiving.label}組で撮影する人数を入れ直します（1〜${groupQueueState.max_size}）。\n`
+      + `いまは ${receiving.size}人の予定で、${receiving.captured}人を撮影済みです。`,
+      String(receiving.size)
+    );
+    if (answer === null) return;
+    const size = Number(answer);
+    if (!Number.isInteger(size) || size < 1 || size > groupQueueState.max_size) {
+      alert(`人数は 1〜${groupQueueState.max_size} の整数で入れてください`);
+      return;
+    }
+    postGroup('/api/groups/size', { size }, [groupSizeFixBtn]);
+  });
+
+  // 出せない組を取り除く逃げ道。これが無いと以後どの組も出せなくなる
+  groupSkipBtn.addEventListener('click', () => {
+    const queue = groupQueueState ? groupQueueState.queue : [];
+    const head = queue.length > 0 ? queue[0] : null;
+    if (!head) return;
+    if (!confirm(
+      `${head.label}組を、閲覧ブースに出さずに取り下げます。\n\n`
+      + `・予定 ${head.size}人 ／ 撮影 ${head.captured}人 ／ 出せる ${head.ready}人\n`
+      + (head.ready > 0 ? `・この${head.ready}人分は、以後どこにも出てきません\n` : '')
+      + '・次の組が「次に出す組」になります\n\n'
+      + '全員の撮影に失敗した組や、撮らずに通り過ぎた組のための操作です。よろしいですか?'
+    )) return;
+    postGroup('/api/groups/skip', null, [groupSkipBtn]);
+  });
+
   advanceBtn.addEventListener('click', async () => {
     advanceBtn.disabled = true;
     try {
@@ -1490,7 +1754,33 @@
       notice.hidden = true;
       await refresh();
     } catch (err) {
-      // 表示できる受付がない場合もここに来る。履歴に残るので画面は変えない
+      /*
+       * 加工がまだ終わっていない人がいる組は、黙って置いていかない。
+       * 置いていくとその人の結果は二度と出せないので、ここで確かめる。
+       */
+      if (err.payload && err.payload.reason === 'group_processing' && err.payload.group) {
+        const group = err.payload.group;
+        if (confirm(
+          `${group.label}組は、まだ${group.processing}人分の加工が終わっていません。\n\n`
+          + `・届いている ${group.ready}人分だけで出します\n`
+          + `・残り${group.processing}人分は、以後どこにも出てきません\n\n`
+          + '少し待てば揃うことがあります。それでも今すぐ出しますか?'
+        )) {
+          try {
+            renderDisplay(await callApi('/api/display/advance', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ force: true })
+            }));
+            pendingNotice = 0;
+            notice.hidden = true;
+          } catch (forceErr) {
+            alert(`出せませんでした。${forceErr.message}`);
+          }
+        }
+      }
+      // それ以外(表示できる受付がない等)は履歴に残るので画面は変えない
+      await refresh();
     } finally {
       advanceBtn.disabled = false;
     }

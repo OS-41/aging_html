@@ -282,6 +282,8 @@ button.quiet {
   font-size: 14px;
 }
 .staff-bar .count { color: var(--ink); font-weight: 600; }
+/* 受付中の組が予定の人数に達した印。次の組の受付を始める合図 */
+.staff-bar .count.is-over { color: #e6ad4b; }
 
 [hidden] { display: none !important; }
 
