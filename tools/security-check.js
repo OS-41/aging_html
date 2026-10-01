@@ -36,12 +36,25 @@
  * 色を消したいときは NO_COLOR=1 を付ける。
  */
 
-const BASE = (process.argv[2] || '').replace(/\/+$/, '');
-const USER = process.argv[3] || '';
-const PASS = process.argv[4] || '';
+const ARGS = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const FLAGS = process.argv.slice(2).filter((a) => a.startsWith('--'));
+const BASE = (ARGS[0] || '').replace(/\/+$/, '');
+const USER = ARGS[1] || '';
+const PASS = ARGS[2] || '';
+
+/*
+ * --rate-limit を付けたときだけ、受付の速さの上限を確かめる。
+ *
+ * 既定で入れていないのは、確かめるのに上限いっぱいまで写真を送る必要があり、
+ * そのあと最大1分間、本物の撮影も断られるようになるため。設営中に
+ * うっかり流すと「撮影ブースが受け付けない」という事故になる。
+ * 一度だけ確かめたいときに、意識して付けてもらう。
+ */
+const CHECK_RATE_LIMIT = FLAGS.includes('--rate-limit');
 
 if (!BASE) {
-  console.error('使い方: node tools/security-check.js <入口のURL> <ユーザー> <パスワード>');
+  console.error('使い方: node tools/security-check.js <入口のURL> <ユーザー> <パスワード> [--rate-limit]');
+  console.error('  --rate-limit … 受付の速さの上限も確かめる(そのあと最大1分、撮影が断られます)');
   process.exit(2);
 }
 
@@ -88,7 +101,8 @@ const SECTIONS = [
   '同時接続',
   '情報の出しすぎ',
   '画面の中身',
-  '中身を知らない相手の手口'
+  '中身を知らない相手の手口',
+  '後片付け'
 ];
 
 const startedAtMs = Date.now();
@@ -178,10 +192,38 @@ async function req(path, options = {}) {
   try {
     const res = await fetch(url, { method, headers: h, body, redirect });
     const text = await res.text();
-    return { status: res.status, headers: res.headers, text, json: safeJson(text) };
+    const json = safeJson(text);
+    if (CDN_THROTTLED.includes(res.status)) {
+      // このサーバー自身の受付上限は、JSONで自分の言葉を返してくる。
+      // 前段に絞られた場合はこの形にならない
+      lastThrottleFrom = json?.error ? 'app' : 'cdn';
+      if (lastThrottleFrom === 'cdn') countThrottle();
+    }
+    return { status: res.status, headers: res.headers, text, json };
   } catch (err) {
     return { status: 0, headers: new Headers(), text: String(err), json: null, error: err };
   }
+}
+
+/** 絞られた回数を数え、続けても当てにならない段になったら止める */
+function countThrottle() {
+  throttledCount += 1;
+  if (throttledCount < THROTTLE_ABORT_AT || abortedByThrottle) return;
+  // 以下、前段に絞られた場合だけ到達する(自分の受付上限では中断しない)
+  abortedByThrottle = true;
+  clearBar();
+  console.error(`\n${yellow('前段(CDN)に絞られたため、途中で止めました')}`);
+  console.error(`  429/503 が ${throttledCount} 件。ここから先は断られたのか通ったのかが分からず、`);
+  console.error('  結果が当てになりません（確かめられていないものが「危険」として並んでしまいます）。');
+  console.error('');
+  console.error('  データセンターのIP(GitHub Codespacesなど)から流すと起きやすくなります。');
+  console.error('  10〜15分ほど置いてから流し直すか、手元の回線から流し直してください。');
+  console.error(`\n  ここまでの結果: 確認できた ${pass.length}件 / 要確認 ${warn.length}件 / 危険 ${fail.length}件`);
+  if (fail.length) {
+    console.error(`\n  ${red('止まるまでに出た「危険」')}（絞られた影響かもしれないので、流し直して確かめること）`);
+    for (const f of fail) console.error(`    NG   ${f.name}${f.note ? `  (${f.note})` : ''}`);
+  }
+  process.exit(2);
 }
 
 function safeJson(text) {
@@ -204,9 +246,50 @@ function safeJson(text) {
  * 本当に見るべきものが埋もれる。
  */
 const CDN_BLOCKED = 403;
+/*
+ * 前段が「絞った」ときの応答。拒否(403)とは意味が違う。
+ *
+ * 403 は「その要求は通さない」という判断なので、断ってほしかった確認では
+ * 目的が達せられている。429/503 は「今は相手をしない」なので、**何も
+ * 確かめられていない**。データセンターのIP(Codespacesなど)から流すと、
+ * 同時60本や黙った接続80本のあとにこれが返ることがある。
+ */
+const CDN_THROTTLED = [429, 503];
+let throttledCount = 0;
+
+/*
+ * 前段に絞られ始めたら、その先の結果は当てにならない。
+ *
+ * 絞られた応答(429/503)は、断られたのでも通ったのでもなく「相手にされて
+ * いない」状態。そのまま続けると、確かめられていないものが「危険」として
+ * 大量に並び、本当に見るべきものが埋もれる。数件を超えたらそこで止めて、
+ * 時間を置いて流し直してもらう。
+ */
+const THROTTLE_ABORT_AT = 5;
+let abortedByThrottle = false;
+/*
+ * 429がどこから来たか。
+ *  'app' … このサーバー自身の受付上限(aging APIの利用枠を守るためのもの)。
+ *          短い間にこの確認を流し直すと当たる。異常ではない
+ *  'cdn' … 前段に絞られた。続けても結果が当てにならない
+ * 要求は順に出しているので、直前の1件を覚えておけば取り違えない。
+ */
+let lastThrottleFrom = 'cdn';
+
+function noteThrottled(name, status, note) {
+  if (lastThrottleFrom === 'app') {
+    return hmm(`${name}（確かめられず）`,
+      `このサーバーの受付上限に当たった(${status})。`
+      + '短い間に流し直すと当たります。1分ほど置いてから流し直してください'
+      + `${note ? ` / ${note}` : ''}`);
+  }
+  throttledCount += 1;
+  return hmm(`${name}（確かめられず）`, `前段(CDN)に絞られた(${status})。しばらく置いて流し直す${note ? ` / ${note}` : ''}`);
+}
 
 /** 断ってほしかった確認。403は前段が断った印として通す。 */
 function expectReject(name, status, allowed, note = '') {
+  if (CDN_THROTTLED.includes(status)) return noteThrottled(name, status, note);
   if (status === CDN_BLOCKED) return ok(name, `前段(CDN)が拒否${note ? ` / ${note}` : ''}`);
   if (allowed.includes(status)) return ok(name, `${status}${note ? ` / ${note}` : ''}`);
   return bad(name, `${status} 期待${allowed.join('・')}${note ? ` / ${note}` : ''}`);
@@ -214,6 +297,7 @@ function expectReject(name, status, allowed, note = '') {
 
 /** 通ってほしかった確認。403だと確かめられていないので要確認にする。 */
 function expectPass(name, status, allowed, note = '') {
+  if (CDN_THROTTLED.includes(status)) return noteThrottled(name, status, note);
   if (status === CDN_BLOCKED) {
     return hmm(`${name}（確かめられず）`, `前段(CDN)が弾いたため、こちらの作りは未確認${note ? ` / ${note}` : ''}`);
   }
@@ -249,6 +333,31 @@ const REAL_JPEG = Buffer.from(
   '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a'
   + 'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA'
   + 'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==', 'base64');
+
+/*
+ * ---- 送った写真の後片付け ----
+ *
+ * この確認は写真の受け口も叩くので、通ったぶんは**本物の受付として
+ * 待ち行列に並ぶ**。開発モード中はaging APIを通さず撮った写真をそのまま
+ * 結果にする作りなので、片付けないまま係員が「結果画面に移行」を押すと、
+ * **ここで送った1×1の画像が閲覧ブースに「未来のあなた」として出てしまう。**
+ *
+ * 開発モードを切れば消えるが、切り忘れに頼る作りにはしない。
+ * 受け取った受付IDをその場で消す。
+ */
+const createdEntries = [];
+let droppedCount = 0;
+let lastSequence = 0;
+
+async function dropEntry(json) {
+  const id = json?.entry_id;
+  if (!id) return;
+  if (json.sequence) lastSequence = Math.max(lastSequence, json.sequence);
+  const r = await req(`/api/entries/${id}`, { method: 'DELETE' });
+  if (r.status === 204) { droppedCount += 1; return; }
+  // 消せなかったものは最後にまとめて知らせる(放置すると閲覧ブースに出る)
+  createdEntries.push({ id, sequence: json.sequence, status: r.status });
+}
 
 function uploadForm(bytes, { type = 'image/jpeg', name = 'shot.jpg', origin = ORIGIN } = {}) {
   const fd = new FormData();
@@ -405,6 +514,7 @@ async function run() {
     for (const [label, bytes, type, expect] of cases) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(bytes, { type }) });
       expectReject(`受け口が断る (${label})`, r.status, [expect]);
+      await dropEntry(r.json);
     }
 
     /*
@@ -421,6 +531,7 @@ async function run() {
     for (const [name, label] of Object.entries(FILENAMES)) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG, { name }) });
       expectReject(`細工したファイル名を受けても壊れない (${label})`, r.status, [201, 400]);
+      await dropEntry(r.json);
     }
 
     // originの偽装(外部APIに任意のURLを取りに行かせられないか)
@@ -433,6 +544,7 @@ async function run() {
       // PUBLIC_ORIGIN が設定されていれば申告は無視されるので201でよい。
       // 設定されていない場合は400で断ること
       expectPass('originの偽装で壊れない', r.status, [201, 400], `${origin.slice(0, 36)} → ${r.status}`);
+      await dropEntry(r.json);
     }
   } else {
     hmm('画像の受け口の確認を飛ばした', '開発モードに入れてから流し直してください');
@@ -897,6 +1009,60 @@ async function run() {
     }
   }
 
+  // ---- 17の手前. 受付の速さの上限(--rate-limit のときだけ) ----
+  if (devMode && CHECK_RATE_LIMIT) {
+    doing('上限に当たるまで写真を送ります。このあと最大1分、撮影が断られます');
+    let accepted = 0;
+    let throttled = 0;
+    for (let i = 0; i < 60; i++) {
+      const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG) });
+      if (r.status === 201) { accepted += 1; await dropEntry(r.json); }
+      else if (r.status === 429) { throttled += 1; if (throttled >= 3) break; }
+      else break;
+    }
+    if (throttled && accepted === 0) {
+      ok('受付の速さに上限がある', 'すでに上限に達していた(直前の確認で使い切ったぶん) — 1分置くと戻ります');
+    } else if (throttled) {
+      ok('受付の速さに上限がある', `${accepted}件で止まり、以後は429 — aging APIの利用枠を守れる`);
+    } else {
+      bad('受付の速さに上限が無い', `${accepted}件を続けて受け付けた — 資格情報が漏れると利用枠を一気に減らされる`);
+    }
+  } else if (devMode) {
+    line(dim('       受付の速さの上限は確かめていません(--rate-limit を付けると確かめます)'));
+  }
+
+  // ---- 17. 送った写真を残していないか ----
+  section(17, '後片付け');
+  {
+    if (createdEntries.length) {
+      bad('送った写真を消しきれていない',
+        `${createdEntries.length}件が残っている(番号 ${createdEntries.map((e) => e.sequence).join(', ')})。`
+        + '係員画面で削除するか、開発モードを切ること');
+    } else if (droppedCount) {
+      ok('送った写真をすべて片付けた', `${droppedCount}件を送って${droppedCount}件とも削除`);
+    } else {
+      ok('写真を送っていないので片付けるものは無い');
+    }
+
+    // 待ち行列に未表示が残っていないか(残っていると閲覧ブースに出てしまう)
+    const after = await req('/api/entries');
+    const waiting = after.json?.waiting;
+    if (typeof waiting === 'number') {
+      waiting === 0
+        ? ok('未表示の受付が残っていない', '閲覧ブースに出るものは無い')
+        : hmm('未表示の受付が残っている', `${waiting}件 — この確認の前からあったものか、係員画面で確かめること`);
+    }
+
+    /*
+     * 受付番号は削除しても戻らない(次の受付は続きの番号になる)。
+     * 本番前に再起動すれば1番から始まるので、その旨だけ伝えておく。
+     */
+    if (lastSequence) {
+      line(dim(`       受付番号を ${lastSequence} まで使いました。削除しても番号は戻りません。`));
+      line(dim('       本番前にサーバーを再起動すれば1番から始まります(デプロイでも再起動します)。'));
+    }
+  }
+
   // ============================================================
   // 途中で1件ずつ出しているので、最後はまとめだけを残す
   // 最後に棒を満たしてから消す(途中で止まったのではないと分かるように)
@@ -924,6 +1090,11 @@ async function run() {
 
   if (fail.length === 0 && warn.length === 0) {
     console.log(green('  指摘はありません。'));
+  }
+  if (throttledCount >= 3) {
+    console.log(yellow(`\n  前段(CDN)に${throttledCount}件絞られています。`));
+    console.log('  データセンターのIP(Codespacesなど)から流すと起きやすくなります。');
+    console.log('  10〜15分ほど置いてから流し直すか、手元の回線から流し直してください。');
   }
   if (devMode) {
     console.log(dim('\n  開発モード中のため、aging APIのユニットは使っていません。'));

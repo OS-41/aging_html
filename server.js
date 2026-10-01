@@ -513,6 +513,52 @@ const MAX_ENTRIES = 300;
 const ENTRY_TTL_MS = 30 * 60 * 1000; // 30分
 const RESULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
 
+/*
+ * ---- 受付を作れる速さの上限 ----
+ *
+ * **ここが守っているのはディスクでもメモリでもなく、aging APIの利用枠。**
+ *
+ * 受付が1件できるたびにaging APIを1回呼ぶ。件数の上限(MAX_ENTRIES)は
+ * 「同時に抱える数」なので、保持期間(30分)が切れて枠が空けばまた受け付ける。
+ * つまり速さに制限が無いと、資格情報を手に入れた相手が
+ *   最初に300件 → 30分ごとに300件
+ * を続けられ、**利用枠を際限なく減らせる**。枠は買ってあるもので、
+ * 尽きたら展示そのものが止まる。失ってから買い直すしかない。
+ *
+ * 実際の撮影は、6人ぶんをまとめて撮っても1分に6件程度。来場500人を
+ * 10時間で割れば平均は1分1件にもならない。30件/分は実運用の3倍以上
+ * 余裕があり、まっとうな撮影では当たらない
+ * (確認スクリプトが1回に送る18件も、この中に収まる)。
+ *
+ * **これで止まるのは「一気に」の部分。**同時に抱える上限(MAX_ENTRIES)と
+ * 保持期間(30分)から、長い目で見た通し数は1時間あたり600件で頭打ちになる。
+ * つまりこの上限は、最初の300件を数秒で持っていかれるのを防ぎ、
+ * 係員が処理履歴の entry:throttled に気づいて手を打つ時間を作るためのもの。
+ * **総量そのものを抑えたいときは、係員画面の人数上限を設定する**
+ * (達した時点で受付が閉じるので、それ以上は1件もAPIを呼ばない)。
+ *
+ * 接続元ごとではなく全体で数える。認証の失敗と同じ理由で、前段のCDNが
+ * 入ると接続元が当てにならないため。
+ */
+const ENTRY_RATE_LIMIT = 30;
+const ENTRY_RATE_WINDOW_MS = 60 * 1000;
+let entryRateCount = 0;
+let entryRateStartedAtMs = 0;
+
+/**
+ * 受付を1件作ってよいか。作ってよければ数えて true を返す。
+ */
+function allowNewEntry() {
+  const now = Date.now();
+  if (now - entryRateStartedAtMs > ENTRY_RATE_WINDOW_MS) {
+    entryRateStartedAtMs = now;
+    entryRateCount = 0;
+  }
+  if (entryRateCount >= ENTRY_RATE_LIMIT) return false;
+  entryRateCount += 1;
+  return true;
+}
+
 // 閲覧ブースの画面は職員が任意のタイミングでまとめて入れ替える。
 // 一度に何人分を並べるかはここで決める。
 const DISPLAY_SLOT_COUNT = 6;
@@ -1487,6 +1533,23 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
     if (entryStore.size >= MAX_ENTRIES) {
       discardUpload(req.file.path);
       return res.status(507).json({ error: '受付の上限に達しています' });
+    }
+    /*
+     * 受付を作る速さの上限。**aging APIの利用枠を守るための関所。**
+     * ここを通ったぶんだけAPIを呼ぶので、他のどの検査よりも
+     * 「APIを呼ぶ直前」に置いてある。
+     */
+    if (!allowNewEntry()) {
+      discardUpload(req.file.path);
+      addLog({
+        level: 'error',
+        event: 'entry:throttled',
+        status: 429,
+        echo: true,
+        message: `1分あたり${ENTRY_RATE_LIMIT}件の上限に達したため受け取りませんでした`
+          + '(まっとうな撮影では当たりません。心当たりが無ければ、資格情報が漏れていないか確かめてください)'
+      });
+      return res.status(429).json({ error: '受付が混み合っています。少し待ってからもう一度お試しください' });
     }
     const capturedAtMs = Date.now();
     const sourceFileId = req.generatedFileId;
