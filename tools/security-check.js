@@ -88,7 +88,8 @@ const SECTIONS = [
   '同時接続',
   '情報の出しすぎ',
   '画面の中身',
-  '中身を知らない相手の手口'
+  '中身を知らない相手の手口',
+  '後片付け'
 ];
 
 const startedAtMs = Date.now();
@@ -299,6 +300,31 @@ const REAL_JPEG = Buffer.from(
   + 'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA'
   + 'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==', 'base64');
 
+/*
+ * ---- 送った写真の後片付け ----
+ *
+ * この確認は写真の受け口も叩くので、通ったぶんは**本物の受付として
+ * 待ち行列に並ぶ**。開発モード中はaging APIを通さず撮った写真をそのまま
+ * 結果にする作りなので、片付けないまま係員が「結果画面に移行」を押すと、
+ * **ここで送った1×1の画像が閲覧ブースに「未来のあなた」として出てしまう。**
+ *
+ * 開発モードを切れば消えるが、切り忘れに頼る作りにはしない。
+ * 受け取った受付IDをその場で消す。
+ */
+const createdEntries = [];
+let droppedCount = 0;
+let lastSequence = 0;
+
+async function dropEntry(json) {
+  const id = json?.entry_id;
+  if (!id) return;
+  if (json.sequence) lastSequence = Math.max(lastSequence, json.sequence);
+  const r = await req(`/api/entries/${id}`, { method: 'DELETE' });
+  if (r.status === 204) { droppedCount += 1; return; }
+  // 消せなかったものは最後にまとめて知らせる(放置すると閲覧ブースに出る)
+  createdEntries.push({ id, sequence: json.sequence, status: r.status });
+}
+
 function uploadForm(bytes, { type = 'image/jpeg', name = 'shot.jpg', origin = ORIGIN } = {}) {
   const fd = new FormData();
   fd.append('file', new Blob([bytes], { type }), name);
@@ -454,6 +480,7 @@ async function run() {
     for (const [label, bytes, type, expect] of cases) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(bytes, { type }) });
       expectReject(`受け口が断る (${label})`, r.status, [expect]);
+      await dropEntry(r.json);
     }
 
     /*
@@ -470,6 +497,7 @@ async function run() {
     for (const [name, label] of Object.entries(FILENAMES)) {
       const r = await req('/api/entries', { method: 'POST', body: uploadForm(REAL_JPEG, { name }) });
       expectReject(`細工したファイル名を受けても壊れない (${label})`, r.status, [201, 400]);
+      await dropEntry(r.json);
     }
 
     // originの偽装(外部APIに任意のURLを取りに行かせられないか)
@@ -482,6 +510,7 @@ async function run() {
       // PUBLIC_ORIGIN が設定されていれば申告は無視されるので201でよい。
       // 設定されていない場合は400で断ること
       expectPass('originの偽装で壊れない', r.status, [201, 400], `${origin.slice(0, 36)} → ${r.status}`);
+      await dropEntry(r.json);
     }
   } else {
     hmm('画像の受け口の確認を飛ばした', '開発モードに入れてから流し直してください');
@@ -943,6 +972,38 @@ async function run() {
       csp
         ? ok('Content-Security-Policy がある', csp.slice(0, 70))
         : hmm('Content-Security-Policy が無い', '万一の持ち出しを止める上乗せが無い');
+    }
+  }
+
+  // ---- 17. 送った写真を残していないか ----
+  section(17, '後片付け');
+  {
+    if (createdEntries.length) {
+      bad('送った写真を消しきれていない',
+        `${createdEntries.length}件が残っている(番号 ${createdEntries.map((e) => e.sequence).join(', ')})。`
+        + '係員画面で削除するか、開発モードを切ること');
+    } else if (droppedCount) {
+      ok('送った写真をすべて片付けた', `${droppedCount}件を送って${droppedCount}件とも削除`);
+    } else {
+      ok('写真を送っていないので片付けるものは無い');
+    }
+
+    // 待ち行列に未表示が残っていないか(残っていると閲覧ブースに出てしまう)
+    const after = await req('/api/entries');
+    const waiting = after.json?.waiting;
+    if (typeof waiting === 'number') {
+      waiting === 0
+        ? ok('未表示の受付が残っていない', '閲覧ブースに出るものは無い')
+        : hmm('未表示の受付が残っている', `${waiting}件 — この確認の前からあったものか、係員画面で確かめること`);
+    }
+
+    /*
+     * 受付番号は削除しても戻らない(次の受付は続きの番号になる)。
+     * 本番前に再起動すれば1番から始まるので、その旨だけ伝えておく。
+     */
+    if (lastSequence) {
+      line(dim(`       受付番号を ${lastSequence} まで使いました。削除しても番号は戻りません。`));
+      line(dim('       本番前にサーバーを再起動すれば1番から始まります(デプロイでも再起動します)。'));
     }
   }
 
