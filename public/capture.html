@@ -608,9 +608,10 @@
       groupHint.classList.remove('is-over');
       return;
     }
-    groupHint.textContent = `${receiving.label}組 ${receiving.captured}/${receiving.size}人`;
-    // 予定より多い＝次の組の受付がまだ始まっていない
-    groupHint.classList.toggle('is-over', receiving.captured >= receiving.size);
+    const max = groups.max_size || 6;
+    groupHint.textContent = `${receiving.label}組 ${receiving.captured}人`;
+    // 上限に達した＝次の組の「組の決定」がまだ押されていない
+    groupHint.classList.toggle('is-over', receiving.captured >= max);
   }
 
   /**

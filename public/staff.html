@@ -504,22 +504,8 @@
     padding-bottom: 12px;
     border-bottom: 1px solid var(--line);
   }
-  .group-sizes {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-  }
-  .group-sizes .label {
-    font-size: 13px;
-    color: var(--muted);
-    margin-right: 4px;
-  }
-  /* 受付は立ったまま素早く押すので、数字のボタンは大きめに取る */
-  .group-sizes button {
-    min-width: 54px;
-    font-variant-numeric: tabular-nums;
-  }
+  /* 受付は立ったまま素早く押すので、「組の決定」は大きめに取る */
+  #groupDecideBtn { min-width: 150px; }
   .group-queue {
     display: grid;
     gap: 6px;
@@ -669,27 +655,20 @@
       -->
       <div class="group-block">
         <p class="hint" style="margin-bottom:10px">
-          受付で、<b>その組で撮影する人数</b>を押します。以後の写真はその組のものとして預かり、
+          受付に組が来たら<b>「組の決定」を1回押します</b>。
+          <b>それ以降に届いた写真（最大<span id="groupMaxHint">—</span>枚）が、その組のもの</b>になり、
           「結果画面に移行」では<b>その組のぶんだけ</b>が出ます
           （6人の組で撮るのが3人でも、次の組の写真が混ざりません）。
+          <b>人数を数える必要はありません。</b>
           受付・別アトラクション・閲覧の<b>3組ぶんまで</b>預かれます。
-          <b>1組も押していないあいだは、未表示の古い順に最大6人</b>で出ます。
+          <b>1度も押していないあいだは、未表示の古い順に最大6人</b>で出ます。
         </p>
-        <div class="group-sizes" id="groupSizeRow">
-          <span class="label">この組で撮影する人数</span>
-          <button type="button" class="quiet" data-group-size="1">1人</button>
-          <button type="button" class="quiet" data-group-size="2">2人</button>
-          <button type="button" class="quiet" data-group-size="3">3人</button>
-          <button type="button" class="quiet" data-group-size="4">4人</button>
-          <button type="button" class="quiet" data-group-size="5">5人</button>
-          <button type="button" class="quiet" data-group-size="6">6人</button>
+        <div class="control-row" id="groupDecideRow">
+          <button type="button" class="primary" id="groupDecideBtn">組の決定</button>
+          <button type="button" class="quiet" id="groupSkipBtn">この組を飛ばす</button>
         </div>
         <div class="group-queue" id="groupQueue"></div>
         <p class="group-empty" id="groupNote"></p>
-        <div class="control-row" style="margin-top:10px">
-          <button type="button" class="quiet" id="groupSizeFixBtn">受付中の組の人数を直す</button>
-          <button type="button" class="quiet" id="groupSkipBtn">この組を飛ばす</button>
-        </div>
       </div>
 
       <p class="now-showing" id="devCountRow" hidden>
@@ -873,11 +852,11 @@
   const limitApplyBtn = document.getElementById('limitApplyBtn');
   const limitClearBtn = document.getElementById('limitClearBtn');
   const serviceNote = document.getElementById('serviceNote');
-  const groupSizeRow = document.getElementById('groupSizeRow');
+  const groupDecideBtn = document.getElementById('groupDecideBtn');
   const groupQueueEl = document.getElementById('groupQueue');
   const groupNote = document.getElementById('groupNote');
   const groupSkipBtn = document.getElementById('groupSkipBtn');
-  const groupSizeFixBtn = document.getElementById('groupSizeFixBtn');
+  const groupMaxHint = document.getElementById('groupMaxHint');
   const reloadBtn = document.getElementById('reloadBtn');
   const themeSelect = document.getElementById('themeSelect');
   const waitingCount = document.getElementById('waitingCount');
@@ -1380,12 +1359,10 @@
     groupQueueState = groups;
 
     const queue = groups.queue || [];
-    for (const button of groupSizeRow.querySelectorAll('button[data-group-size]')) {
-      // 3組預かっているあいだは受付を始められない(先に先頭を出してもらう)
-      button.disabled = queue.length >= groups.max;
-    }
+    // 3組預かっているあいだは次の組を決められない(先に先頭を出してもらう)
+    groupDecideBtn.disabled = queue.length >= groups.max;
     groupSkipBtn.disabled = queue.length === 0;
-    groupSizeFixBtn.disabled = queue.length === 0;
+    groupMaxHint.textContent = String(groups.max_size);
 
     groupQueueEl.replaceChildren(...queue.map((group, index) => {
       const row = document.createElement('div');
@@ -1409,16 +1386,16 @@
 
       const counts = document.createElement('span');
       counts.className = 'counts';
-      counts.textContent = `予定 ${group.size}人 ／ 撮影 ${group.captured}人 ／ 出せる ${group.ready}人`
+      counts.textContent = `撮影 ${group.captured}人 ／ 出せる ${group.ready}人`
         + (group.processing > 0 ? ` ／ 加工待ち ${group.processing}人` : '')
         + (group.failed > 0 ? ` ／ 失敗 ${group.failed}人` : '');
       row.append(counts);
 
-      // 予定より多く撮っている＝次の組の受付を始め忘れている可能性が高い
-      if (group.captured > group.size) {
+      // 上限を超えた＝次の組の「組の決定」を押し忘れている可能性が高い
+      if (group.captured > groupQueueState.max_size) {
         const over = document.createElement('b');
         over.className = 'level-warn';
-        over.textContent = '予定より多く撮っています';
+        over.textContent = `${groupQueueState.max_size}枚を超えた分は出せません`;
         row.append(over);
       }
       if (group.sequences.length > 0) {
@@ -1691,43 +1668,21 @@
     }
   }
 
-  // 受付でその組の撮影人数を押す。以後の写真はこの組のものになる
-  groupSizeRow.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-group-size]');
-    if (!button || button.disabled) return;
-    const size = Number(button.dataset.groupSize);
+  // 受付に組が来たら押す。これ以降に届いた写真がその組のものになる
+  groupDecideBtn.addEventListener('click', () => {
     const queue = groupQueueState ? groupQueueState.queue : [];
     const receiving = queue.length > 0 ? queue[queue.length - 1] : null;
     /*
-     * 受付中の組にまだ1枚も届いていないのに次の組を始めるのは、
-     * 押し間違い(人数を直したかった)の可能性が高いので確かめる。
+     * 受付中の組にまだ1枚も届いていないのに押すのは、二度押しの可能性が高い。
+     * そのまま通すと、中身の無い組が増えて先頭に残り、以後が出せなくなる。
      */
     if (receiving && receiving.captured === 0 && !confirm(
       `${receiving.label}組はまだ1人も撮影していません。\n\n`
-      + `このまま新しい組（${size}人）の受付を始めますか?\n`
-      + `${receiving.label}組の人数を直したいだけなら「キャンセル」を押し、`
-      + '「受付中の組の人数を直す」を使ってください。'
+      + 'このまま次の組を決めると、空の組が残ります。\n'
+      + '（押し間違いなら「キャンセル」を押してください）\n\n'
+      + '次の組を決めますか?'
     )) return;
-    postGroup('/api/groups', { size }, [...groupSizeRow.querySelectorAll('button')]);
-  });
-
-  // 押し間違えたときに、受付中の組の人数だけを入れ直す
-  groupSizeFixBtn.addEventListener('click', () => {
-    const queue = groupQueueState ? groupQueueState.queue : [];
-    const receiving = queue.length > 0 ? queue[queue.length - 1] : null;
-    if (!receiving) return;
-    const answer = prompt(
-      `${receiving.label}組で撮影する人数を入れ直します（1〜${groupQueueState.max_size}）。\n`
-      + `いまは ${receiving.size}人の予定で、${receiving.captured}人を撮影済みです。`,
-      String(receiving.size)
-    );
-    if (answer === null) return;
-    const size = Number(answer);
-    if (!Number.isInteger(size) || size < 1 || size > groupQueueState.max_size) {
-      alert(`人数は 1〜${groupQueueState.max_size} の整数で入れてください`);
-      return;
-    }
-    postGroup('/api/groups/size', { size }, [groupSizeFixBtn]);
+    postGroup('/api/groups', null, [groupDecideBtn]);
   });
 
   // 出せない組を取り除く逃げ道。これが無いと以後どの組も出せなくなる
@@ -1737,7 +1692,7 @@
     if (!head) return;
     if (!confirm(
       `${head.label}組を、閲覧ブースに出さずに取り下げます。\n\n`
-      + `・予定 ${head.size}人 ／ 撮影 ${head.captured}人 ／ 出せる ${head.ready}人\n`
+      + `・撮影 ${head.captured}人 ／ 出せる ${head.ready}人\n`
       + (head.ready > 0 ? `・この${head.ready}人分は、以後どこにも出てきません\n` : '')
       + '・次の組が「次に出す組」になります\n\n'
       + '全員の撮影に失敗した組や、撮らずに通り過ぎた組のための操作です。よろしいですか?'
