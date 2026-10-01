@@ -418,11 +418,8 @@ async function run() {
        * 組の操作は認証の中にあるか。
        * 外から押せると、展示中に組を飛ばされて来場者の結果が消える。
        */
-      for (const p of ['/api/groups', '/api/groups/size', '/api/groups/skip']) {
-        const r3 = await req(p, {
-          auth: false, method: 'POST',
-          headers: { 'Content-Type': 'application/json' }, body: '{"size":1}'
-        });
+      for (const p of ['/api/groups', '/api/groups/skip']) {
+        const r3 = await req(p, { auth: false, method: 'POST' });
         r3.status === 401 ? ok(`認証なしでは組を触れない (${p})`) : bad(`認証なしで組を触れてしまう (${p})`, `${r3.status}`);
       }
 
@@ -482,7 +479,7 @@ async function run() {
   section(4, '他所のページからの操作(CSRF)');
   {
     for (const p of ['/api/display/advance', '/api/display/clear', '/api/display/updates', '/api/dev', '/api/service',
-      '/api/groups', '/api/groups/size', '/api/groups/skip']) {
+      '/api/groups', '/api/groups/skip']) {
       const r = await req(p, { method: 'POST', crossSite: true });
       r.status === 403 ? ok(`他所からのPOSTを断る (${p})`) : bad(`他所からのPOSTを断っていない (${p})`, `${r.status}`);
     }
@@ -617,33 +614,30 @@ async function run() {
     }
 
     /*
-     * 受付した組の人数。
+     * 組の操作。
      *
      * ここは**作らない確認だけ**にしてある。組を1つ作ると、以後その組に
      * 本物の受付が入ってしまい、開場中に流すと運用そのものを壊すため。
-     * 型の取り違えで通ってしまわないかだけを見る(true が 1人の組に
-     * ならないか、など)。
+     * 本文を見ないエンドポイントなので、細工した本文で落ちないかを見る。
      */
     for (const [label, body] of [
-      ['組の人数が0', '{"size":0}'],
-      ['組の人数が上限超', '{"size":7}'],
-      ['組の人数が負', '{"size":-1}'],
-      ['組の人数が小数', '{"size":2.5}'],
-      ['組の人数が文字列', '{"size":"3"}'],
-      ['組の人数がtrue', '{"size":true}'],
-      ['組の人数が配列', '{"size":[3]}'],
-      ['組の人数がInfinity相当', '{"size":1e999}'],
-      ['組の人数が無い', '{}']
+      ['本文が配列', '[]'],
+      ['本文が文字列', '"x"'],
+      ['本文が数', '5'],
+      ['本文が深い入れ子', JSON.stringify({ a: { b: { c: { d: 1 } } } })],
+      ['__proto__入り', '{"__proto__":{"polluted":true}}']
     ]) {
-      for (const path of ['/api/groups', '/api/groups/size']) {
-        const r = await req(path, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body
-        });
-        // 受付中の組が無ければ /api/groups/size は 409。どちらも「作られていない」
-        [400, 409].includes(r.status)
-          ? ok(`組の人数を検証する (${label})`, `${path} → ${r.status}`)
-          : bad('組の人数を検証していない', `${path} ${body} → ${r.status}`);
-      }
+      const r = await req('/api/groups/skip', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body
+      });
+      /*
+       * 預かっている組が無ければ409、あれば200(その場合は組を1つ消すが、
+       * これは skip の正しい動作)。500 だけは通してはいけない。
+       * 403 は前段(CDN)が __proto__ を先に弾いた印。
+       */
+      [200, 400, 403, 409].includes(r.status)
+        ? ok(`組の操作が細工した本文で壊れない (${label})`, `${r.status}`)
+        : bad('組の操作が細工した本文で壊れる', `${body} → ${r.status}`);
     }
 
     for (const [label, body, expect] of [

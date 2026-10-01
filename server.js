@@ -26,8 +26,7 @@
  *   GET    /api/display                       閲覧ブースに映している内容
  *   POST   /api/display/advance               次の組(組が無ければ古い順)に入れ替える(係員用)
  *   POST   /api/display/clear                 表示を消す(係員用)
- *   POST   /api/groups                        受付した組の人数を預かる(係員用)
- *   POST   /api/groups/size                   受付中の組の人数を直す(係員用)
+ *   POST   /api/groups                        受付に来た組の境目を入れる(係員用)
  *   POST   /api/groups/skip                   先頭の組を出さずに取り下げる(係員用)
  *   GET    /api/logs                          処理履歴(サーバー・クライアント双方)
  *   POST   /api/logs                          クライアントからの履歴を記録する
@@ -583,9 +582,13 @@ const DISPLAY_SLOT_COUNT = 6;
  * 写真が3枚くっついてきて、**まだ閲覧ブースに来ていない人の結果が
  * 先に映ってしまう**。
  *
- * そこで、受付の時点で係員に「この組で撮影するのは何人か」を押してもらい、
- * それ以降の写真をその組のものとして預かる。閲覧ブースへ出すときは
- * 先頭の組のぶんだけを出し、その組をキューから取り除く。
+ * そこで、受付で組が来たら係員に**「組の決定」を1回押してもらう**だけにする。
+ * 以後に届いた写真(最大 MAX_GROUP_SIZE 枚)がその組のものになり、
+ * 閲覧ブースへ出すときは先頭の組のぶんだけを出して、その組を取り除く。
+ *
+ * **人数は聞かない。**受付で「何人撮りますか」と数えてから押すのは、列が
+ * 進んでいる場では間に合わず、数え違いがそのまま表示の間違いになる。
+ * 実際に届いた写真の数で組を区切れば、数えなくても境目は正しく引ける。
  *
  * **キューは3つまで**。②が閲覧ブースに着くころには③・④の撮影が
  * 終わっているので、②の人数を2組ぶん先まで覚えておく必要がある。
@@ -596,6 +599,7 @@ const DISPLAY_SLOT_COUNT = 6;
  * 動く。朝の試運転や、この仕組みを使わない運用でも止まらないようにするため。
  */
 const MAX_PENDING_GROUPS = 3;
+// 1組に入る写真の上限。閲覧ブースの区画数と同じで、超えたぶんは出せない
 const MAX_GROUP_SIZE = DISPLAY_SLOT_COUNT;
 
 // 組の通し番号(係員が口頭で指せるように、1から順に振る)
@@ -629,7 +633,6 @@ function toPublicGroup(group, index) {
   return {
     id: group.id,
     label: group.label,
-    size: group.size,
     position: index,
     // 受付中の組かどうか(次に届く写真が入る組)
     receiving: index === groupQueue.length - 1,
@@ -1717,17 +1720,19 @@ router.post('/api/entries', requireBasicAuth, (req, res) => {
       entry.groupId = group.id;
       entry.groupLabel = group.label;
       group.entryIds.push(entry.id);
-      if (group.entryIds.length > group.size) {
+      if (group.entryIds.length > MAX_GROUP_SIZE) {
         /*
-         * 予定より多く撮った。写真は受け取る(来場者はもう撮り終えている)が、
-         * 次の組の受付を始め忘れている可能性が高いので、はっきり残す。
+         * 1組に入る上限を超えた。写真は受け取る(来場者はもう撮り終えている)が、
+         * **閲覧ブースの区画は MAX_GROUP_SIZE しかないので、この人は出せない**。
+         * 「組の決定」を押し忘れて次の組の写真が流れ込んでいる可能性が高いので、
+         * はっきり残す。
          */
         addLog({
           level: 'warn',
           event: 'group:over',
           echo: true,
-          message: `${group.label}組は${group.size}人の予定ですが${group.entryIds.length}人目を受け付けました`
-            + '(次の組の受付を始め忘れていないか確かめてください)'
+          message: `${group.label}組が${MAX_GROUP_SIZE}枚を超えました(${group.entryIds.length}枚目)。`
+            + 'この写真は閲覧ブースに出ません(次の組の「組の決定」を押し忘れていないか確かめてください)'
         });
       }
     }
@@ -1851,7 +1856,7 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
     addLog({
       level: processing > 0 || overflow.length > 0 ? 'warn' : 'info',
       event: 'group:shown',
-      message: `${group.label}組(予定${group.size}人)を出します: ${next.length}人`
+      message: `${group.label}組を出します: ${next.length}人`
         + (processing > 0 ? ` / 加工待ち${processing}人を置いていきます` : '')
         + (overflow.length > 0 ? ` / 画面に入らない${overflow.length}人は出しません` : '')
     });
@@ -1898,19 +1903,11 @@ router.post('/api/display/advance', requireBasicAuth, (req, res) => {
 
 /**
  * POST /api/groups
- * 受付した組を1つ預かる(係員が受付で人数を押したとき)。
- * これ以降に届く写真は、この組のものとして預かる。
- * body: { "size": 1〜MAX_GROUP_SIZE }  その組で**撮影する**人数
+ * 受付に来た組の境目を1つ入れる(係員の「組の決定」)。
+ * **これ以降に届いた写真が、この組のものになる**(最大 MAX_GROUP_SIZE 枚)。
+ * 本文は見ない(人数は聞かない)。
  */
 router.post('/api/groups', requireBasicAuth, (req, res) => {
-  const wanted = req.body?.size;
-  /*
-   * 人数上限と同じ理由で、数で送られてきたかを見る。
-   * Number() に通すだけだと true が 1 に化け、1人の組として通ってしまう。
-   */
-  if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_GROUP_SIZE) {
-    return res.status(400).json({ error: `size は 1〜${MAX_GROUP_SIZE} の整数(数値)で指定してください` });
-  }
   if (groupQueue.length >= MAX_PENDING_GROUPS) {
     const head = groupQueue[0];
     addLog({
@@ -1931,41 +1928,13 @@ router.post('/api/groups', requireBasicAuth, (req, res) => {
   groupQueue.push({
     id: randomUUID(),
     label: groupSequence,
-    size: wanted,
     openedAtMs: Date.now(),
     entryIds: []
   });
   addLog({
     event: 'group:opened',
     echo: true,
-    message: `${groupSequence}組の受付を始めました(撮影する人 ${wanted}人)`
-  });
-  res.json(currentDisplay());
-});
-
-/**
- * POST /api/groups/size
- * 受付中の組の人数を入れ直す(押し間違えたとき)。
- * すでに預かっている写真の所属は変えない。
- * body: { "size": 1〜MAX_GROUP_SIZE }
- */
-router.post('/api/groups/size', requireBasicAuth, (req, res) => {
-  const wanted = req.body?.size;
-  if (typeof wanted !== 'number' || !Number.isInteger(wanted) || wanted < 1 || wanted > MAX_GROUP_SIZE) {
-    return res.status(400).json({ error: `size は 1〜${MAX_GROUP_SIZE} の整数(数値)で指定してください` });
-  }
-  const group = receivingGroup();
-  if (!group) {
-    return res.status(409).json({ error: '受付中の組がありません', ...currentDisplay() });
-  }
-
-  const before = group.size;
-  group.size = wanted;
-  addLog({
-    level: 'warn',
-    event: 'group:resized',
-    echo: true,
-    message: `${group.label}組の人数を ${before}人 から ${wanted}人 に直しました`
+    message: `${groupSequence}組の受付を始めました(これ以降の写真がこの組になります)`
   });
   res.json(currentDisplay());
 });
@@ -1997,7 +1966,7 @@ router.post('/api/groups/skip', requireBasicAuth, (req, res) => {
     level: 'warn',
     event: 'group:skipped',
     echo: true,
-    message: `${group.label}組(予定${group.size}人)を閲覧ブースに出さずに取り下げました`
+    message: `${group.label}組を閲覧ブースに出さずに取り下げました`
       + `(未表示だった${dropped}人分は、以後出てきません)`
   });
   res.json(currentDisplay());
