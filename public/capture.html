@@ -43,6 +43,13 @@
     margin: 0;
     font-size: clamp(16px, 2.2vw, 19px);
   }
+  /* 2回目は要らないことを、次へ進んでもらう場面でもう一度伝える */
+  .receipt-once {
+    margin: 10px 0 0;
+    font-size: clamp(13px, 1.6vw, 15px);
+    color: var(--muted);
+  }
+  .receipt-once b { color: var(--ink); font-weight: 600; }
 
   /*
    * 送信してから受付が確定するまでのおおい。撮影した写真を薄く残したまま
@@ -130,9 +137,28 @@
     text-align: center;
   }
   .privacy b { color: var(--ink); font-weight: 600; }
+  /*
+   * 2回目以降を控えてもらうお願い。掲示(.privacy)は「写真の扱い」の
+   * 知らせで、こちらは「来場者へのお願い」。読む気持ちが違うので
+   * 枠を分け、少しだけ前に出す。
+   */
+  .once {
+    width: 100%;
+    max-width: 780px;
+    margin: 6px auto 0;
+    padding: 6px 14px;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    color: var(--ink);
+    font-size: clamp(12px, 1.3vw, 15px);
+    line-height: 1.6;
+    text-align: center;
+  }
+  .once b { font-weight: 700; }
   /* 縦の短い画面では掲示も詰める(読める大きさは保つ) */
   @media (max-height: 900px) {
-    .privacy {
+    .privacy,
+    .once {
       margin-top: 5px;
       padding: 4px 12px;
       font-size: 11.5px;
@@ -195,6 +221,7 @@
   body.is-closed .receipt,
   body.is-closed .failure,
   body.is-closed .privacy,
+  body.is-closed .once,
   body.is-closed #status { display: none !important; }
 
   /* 開発モードのときだけ出る操作欄。来場者向けの表示とは色で区別する */
@@ -234,6 +261,15 @@
         元の写真は加工が終わりしだい削除し、加工後の写真も<b>最大30分</b>で消去します。
         写真を他の目的に使うことはありません。
       </p>
+      <!--
+        2回目以降を控えてもらうお願い。
+        この場での「撮り直す」(送る前にやり直すこと)と取り違えられると、
+        撮り直してよいか迷わせてしまうので、かっこ書きで切り分けてある。
+      -->
+      <p class="once">
+        <b>ご撮影はお一人さま1回</b>にご協力ください（この場での<b>撮り直しは何度でも</b>かまいません）。
+        加工後のお写真を<b>ご覧になれなかった場合は、もう一度お撮りできます</b>。係員にお申し付けください。
+      </p>
     </div>
 
     <p class="status" id="status">「カメラを開始」を押してください</p>
@@ -264,6 +300,7 @@
       <p class="receipt-label">あなたの番号</p>
       <p class="receipt-number" id="receiptNumber">—</p>
       <p class="receipt-note">この番号の順に呼ばれます。このまま次へお進みください。</p>
+      <p class="receipt-once">ご撮影は以上です。<b>もう一度お撮りいただく必要はありません。</b></p>
     </div>
 
     <!--
